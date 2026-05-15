@@ -4,3 +4,6 @@ dist
 .DS_Store
 .env
 .env.*
+.claude/dev-loop-state.json
+.claude/dev-loop.log.md
+.claude/dev-loop-plan.md
