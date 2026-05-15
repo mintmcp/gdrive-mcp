@@ -7,25 +7,26 @@ import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 
 const GOOGLE_DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
-const SUPPORTED_MIME_TYPES = [
-  // Text
-  'text/plain',
-  'text/csv',
-  'text/html',
-  'text/xml',
+
+// MIME categorisation for get_file. We derive these from the *actual* metadata
+// mimeType, not from caller-supplied input, so the tool can't be lied into
+// returning garbled output.
+const TEXTUAL_APPLICATION_MIMES = new Set([
   'application/json',
   'application/xml',
   'application/javascript',
   'application/yaml',
-  // Images
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-  'image/svg+xml',
-  // Documents
-  'application/pdf',
-] as const;
+  'application/x-yaml',
+]);
+function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc' | 'unsupported' {
+  if (!mimeType) return 'unsupported';
+  if (mimeType.startsWith('application/vnd.google-apps.')) return 'native-doc';
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('text/')) return 'text';
+  if (TEXTUAL_APPLICATION_MIMES.has(mimeType)) return 'text';
+  return 'unsupported';
+}
 
 // Retry tuning for transient Drive errors (429 / 5xx).
 const MAX_RETRY_ATTEMPTS = 3;          // total attempts including the first
@@ -446,7 +447,7 @@ Always include "trashed = false" unless searching trash.`),
       },
 
       get_file: {
-        description: 'Get the content of a file from Google Drive. Supports text files, images, and PDFs up to 20MB. Does not support Google Docs/Sheets/Slides — use the dedicated MCP servers for those.',
+        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use the dedicated MCP servers for those.',
         readOnlyHint: true,
         outputSchema: {
           id: z.string().optional(),
@@ -456,77 +457,99 @@ Always include "trashed = false" unless searching trash.`),
           content: z.string().optional(),
         },
         schema: {
-          file_id: z.string().describe('The Google Drive file ID'),
-          mime_type: z.enum(SUPPORTED_MIME_TYPES).describe('The MIME type of the file. Use search_files to find this.'),
+          file_id: z.string().describe('The Google Drive file ID (from search_files).'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id, mime_type }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
           const { accessToken } = context;
 
-          // 1. Fetch metadata
-          const meta = await makeDriveRequest(
-            `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,size,webViewLink,webContentLink&supportsAllDrives=true`,
-            accessToken
-          );
+          try {
+            // 1. Fetch metadata so we can branch on the *actual* mimeType.
+            const meta = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,size,webViewLink&supportsAllDrives=true`,
+              accessToken
+            );
 
-          const mimeType: string = meta.mimeType || '';
-          const size = meta.size ? parseInt(meta.size) : 0;
-          const name: string = meta.name || '';
+            const mimeType: string = meta.mimeType || '';
+            const size = meta.size ? parseInt(meta.size) : 0;
+            const name: string = meta.name || '';
+            const kind = classifyMime(mimeType);
 
-          // Size check
-          if (size > MAX_FILE_SIZE) {
-            return {
-              content: [{ type: 'text' as const, text: `File '${name}' exceeds the 20MB limit. Download it directly: ${meta.webContentLink || meta.webViewLink}` }],
-            };
-          }
-
-          // Fetch content
-          const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
-          const response = await fetch(downloadUrl, {
-            headers: { 'Authorization': `Bearer ${accessToken}` },
-          });
-
-          if (!response.ok) {
-            throw new Error(`Failed to download file (${response.status})`);
-          }
-
-          if (mime_type.startsWith('image/') || mime_type === 'application/pdf') {
-            const arrayBuffer = await response.arrayBuffer();
-            const bytes = new Uint8Array(arrayBuffer);
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) {
-              binary += String.fromCharCode(bytes[i]);
+            if (kind === 'native-doc') {
+              return formatDriveError(new Error(
+                `File '${name}' is a Google-native document (${mimeType}) and is not supported by this server. ` +
+                `Use the dedicated MCP server: Google Docs for .document, Google Sheets for .spreadsheet, ` +
+                `Google Slides for .presentation. Open in browser: ${meta.webViewLink || 'n/a'}.`
+              ));
             }
-            const base64Data = btoa(binary);
 
-            if (mime_type === 'application/pdf') {
+            if (kind === 'unsupported') {
+              return formatDriveError(new Error(
+                `File '${name}' has unsupported mimeType '${mimeType}'. ` +
+                `This tool supports text/*, application/json|xml|javascript|yaml, image/*, and application/pdf. ` +
+                `Open in browser: ${meta.webViewLink || 'n/a'}.`
+              ));
+            }
+
+            if (size > MAX_FILE_SIZE) {
+              return formatDriveError(new Error(
+                `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
+                `Open in browser instead: ${meta.webViewLink || 'n/a'}.`
+              ));
+            }
+
+            // 2. Download bytes.
+            const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
+            const response = await fetch(downloadUrl, {
+              headers: { 'Authorization': `Bearer ${accessToken}` },
+            });
+
+            if (!response.ok) {
+              const bodyText = await response.text().catch(() => '');
+              throw new DriveApiError(
+                `Failed to download file content${bodyText ? `: ${bodyText}` : ''} (${response.status})`,
+                response.status,
+              );
+            }
+
+            if (kind === 'image' || kind === 'pdf') {
+              const arrayBuffer = await response.arrayBuffer();
+              // Node ≥22 is declared in package.json; Buffer is safe and avoids
+              // the O(n²) String.fromCharCode chunking required by btoa.
+              const base64Data = Buffer.from(arrayBuffer).toString('base64');
+
+              if (kind === 'pdf') {
+                return {
+                  content: [
+                    { type: 'text' as const, text: JSON.stringify({ id: meta.id, name, mimeType, size }, null, 2) },
+                    {
+                      type: 'resource' as const,
+                      resource: {
+                        uri: `gdrive://file/${meta.id}`,
+                        mimeType,
+                        blob: base64Data,
+                      },
+                    },
+                  ],
+                };
+              }
+
               return {
                 content: [
-                  { type: 'text' as const, text: JSON.stringify({ id: meta.id, name, mimeType, size }, null, 2) },
-                  {
-                    type: 'resource' as const,
-                    resource: {
-                      uri: `gdrive://file/${meta.id}`,
-                      mimeType,
-                      blob: base64Data,
-                    },
-                  },
+                  { type: 'image' as const, data: base64Data, mimeType },
                 ],
               };
             }
 
+            // kind === 'text'
+            const textContent = await response.text();
+            const result = { id: meta.id, name, mimeType, size, content: textContent };
             return {
-              content: [
-                { type: 'image' as const, data: base64Data, mimeType },
-              ],
+              content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+              structuredContent: result,
             };
+          } catch (err) {
+            return formatDriveError(err);
           }
-
-          const textContent = await response.text();
-          const result = { id: meta.id, name, mimeType, size, content: textContent };
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-          };
         }),
       },
     };
