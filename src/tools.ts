@@ -671,48 +671,59 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       share_file: {
-        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email) or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient.',
+        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only).',
         outputSchema: {
           permissionId: z.string().optional(),
           fileId: z.string(),
           type: z.string(),
           role: z.string(),
           emailAddress: z.string().optional(),
+          domain: z.string().optional(),
           message: z.string(),
         },
         schema: {
           file_id: z.string().describe('ID of the file or folder to share.'),
-          type: z.enum(['user', 'anyone']).describe('"user" to share with a specific email; "anyone" for link-sharing.'),
+          type: z.enum(['user', 'anyone', 'domain']).describe('"user" to share with a specific email; "domain" to share with everyone in a Google Workspace domain; "anyone" for link-sharing with the public.'),
           role: z.enum(['reader', 'commenter', 'writer']).describe('Access level to grant. "reader" = view, "commenter" = view+comment, "writer" = edit.'),
           email: z.string().email().optional().describe('Required when type="user": the recipient email address.'),
+          domain: z.string().optional().describe('Required when type="domain": the Workspace domain (e.g. "example.com"). The signed-in user must be a member of this domain or have permission to share with it.'),
           send_notification: z
             .boolean()
             .optional()
-            .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify.'),
+            .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify. Ignored for type="anyone" and type="domain".'),
           message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, send_notification, message }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message }: any, context: any) => {
           const { accessToken } = context;
 
           try {
-            if (type === 'user' && !email) {
-              return formatDriveError(new Error('email is required when type="user".'));
-            }
-            if (type === 'anyone' && email) {
-              return formatDriveError(new Error('email must be omitted when type="anyone".'));
-            }
-            if (type === 'anyone' && send_notification === true) {
-              return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
+            // Per-type required/forbidden field validation.
+            if (type === 'user') {
+              if (!email) return formatDriveError(new Error('email is required when type="user".'));
+              if (domain) return formatDriveError(new Error('domain must be omitted when type="user".'));
+            } else if (type === 'domain') {
+              if (!domain) return formatDriveError(new Error('domain is required when type="domain".'));
+              if (email) return formatDriveError(new Error('email must be omitted when type="domain".'));
+              if (send_notification === true) {
+                return formatDriveError(new Error('send_notification is only valid when type="user" — Drive does not email every member of a domain.'));
+              }
+            } else { // anyone
+              if (email) return formatDriveError(new Error('email must be omitted when type="anyone".'));
+              if (domain) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
+              if (send_notification === true) {
+                return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
+              }
             }
 
             // Drive only accepts sendNotificationEmail=true for type=user;
-            // force false for type=anyone to avoid 400s from the API.
+            // force false for the others to avoid 400s from the API.
             const notify = type === 'user' && send_notification === true;
             const body: any = { type, role };
             if (type === 'user') body.emailAddress = email;
+            if (type === 'domain') body.domain = domain;
 
             const params = new URLSearchParams({
-              fields: 'id,type,role,emailAddress',
+              fields: 'id,type,role,emailAddress,domain',
               supportsAllDrives: 'true',
               sendNotificationEmail: notify ? 'true' : 'false',
             });
@@ -728,15 +739,21 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               },
             );
 
+            const verb = role === 'reader' ? 'view' : role === 'commenter' ? 'view and comment on' : 'edit';
+            const successMessage = type === 'anyone'
+              ? `Anyone with the link can ${verb} this file`
+              : type === 'domain'
+                ? `Anyone in ${domain} can ${verb} this file`
+                : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`;
+
             const output = {
               permissionId: result.id,
               fileId: file_id,
               type: result.type,
               role: result.role,
               emailAddress: result.emailAddress,
-              message: type === 'anyone'
-                ? `Anyone with the link can ${role === 'reader' ? 'view' : role === 'commenter' ? 'view and comment on' : 'edit'} this file`
-                : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`,
+              domain: result.domain,
+              message: successMessage,
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
