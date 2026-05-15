@@ -228,6 +228,7 @@ const driveFileSchema = z.object({
   webViewLink: z.string().optional(),
   owner: z.string().optional(),
   isFolder: z.boolean().optional(),
+  trashed: z.boolean().optional(),
 }).passthrough();
 
 /**
@@ -237,33 +238,40 @@ export class GoogleDriveTools {
   static getTools() {
     return {
       search_files: {
-        description: 'Search for files and folders in Google Drive using flexible search operators. Supports filtering by name, owner, file type, date, starred status, and more.',
+        description: `Search Google Drive for files and folders. Use this when the user asks to find/locate/list items, or before get_file when only a file name is known. Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages.`,
         readOnlyHint: true,
         outputSchema: {
           files: z.array(driveFileSchema),
           nextPageToken: z.string().nullable(),
         },
         schema: {
-          query: z.string().describe(`Google Drive API q parameter. Uses Drive query syntax:
+          query: z.string().describe(`Drive API 'q' expression. Examples:
 - name contains 'budget' and trashed = false
 - 'user@example.com' in owners and trashed = false
-- mimeType = 'application/vnd.google-apps.document' and modifiedTime > '2025-01-01T00:00:00'
 - mimeType = 'application/pdf' and trashed = false
-- sharedWithMe and trashed = false
-- starred = true and trashed = false
 - 'FOLDER_ID' in parents and trashed = false
+- starred = true and trashed = false
+- sharedWithMe and trashed = false
 Operators: name, mimeType, modifiedTime, createdTime, owners, writers, readers, starred, trashed, sharedWithMe, parents.
 Comparisons: contains, =, !=, <, >, <=, >=. Combine with: and, or, not.
-Always include "trashed = false" unless searching trash.`),
-          page_token: z.string().optional().describe('Token for fetching the next page of results'),
+String literals use single quotes; escape internal apostrophes as \\' (e.g. name contains 'O\\\\'Brien'). Always include "trashed = false" unless searching trash.`),
+          page_size: z
+            .number()
+            .int()
+            .min(1)
+            .max(100)
+            .optional()
+            .describe('Number of results per page (1-100, default 20). Cap is 100 to keep responses readable.'),
+          page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ query, page_token }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ query, page_token, page_size }: any, context: any) => {
           const { accessToken } = context;
 
           try {
+            const effectivePageSize = Math.min(Math.max(Number(page_size) || 20, 1), 100);
             const params = new URLSearchParams({
-              pageSize: '20',
-              fields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners)',
+              pageSize: String(effectivePageSize),
+              fields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed)',
               supportsAllDrives: 'true',
               includeItemsFromAllDrives: 'true',
               q: query,
@@ -304,6 +312,7 @@ Always include "trashed = false" unless searching trash.`),
               webViewLink: file.webViewLink,
               owner: file.owners?.[0]?.emailAddress,
               isFolder: file.mimeType === 'application/vnd.google-apps.folder',
+              trashed: file.trashed === true,
             }));
 
             const output = {
