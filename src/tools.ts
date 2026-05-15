@@ -715,19 +715,26 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const { accessToken } = context;
 
           try {
+            // Normalise domain up front — strip whitespace and reject empty.
+            const normalisedDomain = typeof domain === 'string' ? domain.trim() : domain;
+
             // Per-type required/forbidden field validation.
             if (type === 'user') {
               if (!email) return formatDriveError(new Error('email is required when type="user".'));
-              if (domain) return formatDriveError(new Error('domain must be omitted when type="user".'));
+              if (normalisedDomain) return formatDriveError(new Error('domain must be omitted when type="user".'));
             } else if (type === 'domain') {
-              if (!domain) return formatDriveError(new Error('domain is required when type="domain".'));
+              if (!normalisedDomain) return formatDriveError(new Error('domain is required when type="domain" and must not be empty or whitespace.'));
+              // Cheap shape check: must look roughly like a hostname (label.tld).
+              if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(normalisedDomain)) {
+                return formatDriveError(new Error(`domain "${normalisedDomain}" does not look like a valid Workspace domain (expected e.g. "example.com").`));
+              }
               if (email) return formatDriveError(new Error('email must be omitted when type="domain".'));
               if (send_notification === true) {
                 return formatDriveError(new Error('send_notification is only valid when type="user" — Drive does not email every member of a domain.'));
               }
             } else { // anyone
               if (email) return formatDriveError(new Error('email must be omitted when type="anyone".'));
-              if (domain) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
+              if (normalisedDomain) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
               if (send_notification === true) {
                 return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
               }
@@ -738,7 +745,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             const notify = type === 'user' && send_notification === true;
             const body: any = { type, role };
             if (type === 'user') body.emailAddress = email;
-            if (type === 'domain') body.domain = domain;
+            if (type === 'domain') body.domain = normalisedDomain;
 
             const params = new URLSearchParams({
               fields: 'id,type,role,emailAddress,domain',
@@ -761,7 +768,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             const successMessage = type === 'anyone'
               ? `Anyone with the link can ${verb} this file`
               : type === 'domain'
-                ? `Anyone in ${domain} can ${verb} this file`
+                ? `Anyone in ${normalisedDomain} can ${verb} this file`
                 : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`;
 
             const output = {
