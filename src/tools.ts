@@ -616,6 +616,15 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const { accessToken } = context;
 
           try {
+            // Cheap circular-move guard: catch the obvious self-move before
+            // round-tripping. Deeper cycles (folder into a descendant) need
+            // recursive traversal — leave those for Drive to reject.
+            if (file_id && new_parent_folder_id && file_id === new_parent_folder_id) {
+              return formatDriveError(new Error(
+                'Cannot move a file or folder into itself — file_id and new_parent_folder_id are the same.'
+              ));
+            }
+
             const shouldRemove = remove_from_current_parents !== false; // default true
 
             // 1. Read current parents so we can build removeParents accurately.
