@@ -238,7 +238,7 @@ export class GoogleDriveTools {
   static getTools() {
     return {
       search_files: {
-        description: `Search Google Drive for files and folders. Use this when the user asks to find/locate/list items, or before get_file when only a file name is known. Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages.`,
+        description: `Search Google Drive for files and folders. Use this when the user asks to find/locate/list items, or before get_file when only a file name is known. By default searches across My Drive AND every shared drive the user can access (corpora=allDrives). Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages.`,
         readOnlyHint: true,
         outputSchema: {
           files: z.array(driveFileSchema),
@@ -255,6 +255,14 @@ export class GoogleDriveTools {
 Operators: name, mimeType, modifiedTime, createdTime, owners, writers, readers, starred, trashed, sharedWithMe, parents.
 Comparisons: contains, =, !=, <, >, <=, >=. Combine with: and, or, not.
 String literals use single quotes; escape internal apostrophes as \\' (e.g. name contains 'O\\\\'Brien'). Always include "trashed = false" unless searching trash.`),
+          mime_type: z
+            .string()
+            .optional()
+            .describe(`Optional MIME type filter (e.g. 'application/pdf', 'application/vnd.google-apps.folder', 'image/png'). When provided, the tool ANDs "mimeType = '<value>'" onto your query — use this instead of hand-writing mimeType in q to avoid quoting mistakes.`),
+          drive_id: z
+            .string()
+            .optional()
+            .describe(`Optional shared drive ID to scope the search to a single shared drive. When omitted, searches across allDrives (My Drive + every accessible shared drive).`),
           page_size: z
             .number()
             .int()
@@ -264,19 +272,42 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             .describe('Number of results per page (1-100, default 20). Cap is 100 to keep responses readable.'),
           page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ query, page_token, page_size }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ query, mime_type, drive_id, page_token, page_size }: any, context: any) => {
           const { accessToken } = context;
 
           try {
             const effectivePageSize = Math.min(Math.max(Number(page_size) || 20, 1), 100);
+
+            // Compose the final q. When mime_type is provided we wrap the user
+            // query in parens before ANDing — necessary because the user q may
+            // contain an `or` at top level.
+            let effectiveQuery = query;
+            if (mime_type) {
+              // Single-quote-escape mime_type per Drive q grammar.
+              const safeMime = String(mime_type).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+              effectiveQuery = query && query.trim().length > 0
+                ? `(${query}) and mimeType = '${safeMime}'`
+                : `mimeType = '${safeMime}'`;
+            }
+
             const params = new URLSearchParams({
               pageSize: String(effectivePageSize),
-              fields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed)',
+              fields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed,driveId)',
               supportsAllDrives: 'true',
               includeItemsFromAllDrives: 'true',
-              q: query,
+              q: effectiveQuery,
               ...(page_token && { pageToken: page_token }),
             });
+
+            // Scope: explicit shared drive, or allDrives across everything.
+            // Without setting corpora, Drive defaults to 'user' and silently
+            // skips shared-drive content even with supportsAllDrives=true.
+            if (drive_id) {
+              params.set('corpora', 'drive');
+              params.set('driveId', drive_id);
+            } else {
+              params.set('corpora', 'allDrives');
+            }
 
             let result;
             try {
