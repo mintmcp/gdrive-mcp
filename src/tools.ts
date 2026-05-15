@@ -243,6 +243,7 @@ export class GoogleDriveTools {
         outputSchema: {
           files: z.array(driveFileSchema),
           nextPageToken: z.string().nullable(),
+          incompleteSearch: z.boolean().optional(),
         },
         schema: {
           query: z.string().describe(`Drive API 'q' expression. Examples:
@@ -292,7 +293,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             const params = new URLSearchParams({
               pageSize: String(effectivePageSize),
-              fields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed,driveId)',
+              fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed,driveId)',
               supportsAllDrives: 'true',
               includeItemsFromAllDrives: 'true',
               q: effectiveQuery,
@@ -317,12 +318,14 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             } catch (error: any) {
               if (error instanceof DriveApiError && error.status === 400) {
+                // Preserve Drive's own message — it usually identifies the
+                // offending field (q, driveId, corpora, mimeType…). Append a
+                // hint that lists the round-2 parameters as likely causes so
+                // the LLM knows where to look.
+                const drive_id_hint = drive_id ? ` (drive_id used: ${JSON.stringify(drive_id)})` : '';
                 throw new DriveApiError(
-                  `Invalid query syntax. The query parameter must use Google Drive API query format. ` +
-                  `You sent: ${JSON.stringify(query)}. ` +
-                  `Examples of valid queries: name contains 'test' and trashed = false, ` +
-                  `'user@example.com' in owners and trashed = false, ` +
-                  `mimeType = 'application/pdf' and trashed = false`,
+                  `${error.message}. Likely causes: malformed 'query' (Drive q syntax), invalid 'mime_type', or invalid 'drive_id'${drive_id_hint}. ` +
+                  `Example valid queries: name contains 'test' and trashed = false; 'user@example.com' in owners and trashed = false.`,
                   400,
                   error.reason,
                 );
@@ -346,10 +349,16 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               trashed: file.trashed === true,
             }));
 
-            const output = {
+            const output: any = {
               files: formattedFiles,
-              nextPageToken: result.nextPageToken || null
+              nextPageToken: result.nextPageToken || null,
             };
+            // Drive sets incompleteSearch=true when it couldn't enumerate every
+            // corpus in time (common with corpora=allDrives across many shared
+            // drives). Surface it so the caller can warn or paginate further.
+            if (result.incompleteSearch === true) {
+              output.incompleteSearch = true;
+            }
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,
