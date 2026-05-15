@@ -3,7 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "./server.js";
 import { requestContext } from "./auth.js";
 
-const PORT = 8000;
+const PORT = Number(process.env.PORT) || 8000;
 const MCP_PATH = "/mcp";
 
 // Build the McpServer ONCE at startup. Tools are registered once;
