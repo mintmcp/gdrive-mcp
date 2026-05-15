@@ -561,6 +561,156 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           }
         }),
       },
+
+      move_file: {
+        description: 'Move a file or folder into a different parent folder in Google Drive. By default the item is removed from its previous parents (true Drive "move" semantics). Also supports an optional rename via new_name. Use this when the user asks to move, relocate, or reorganise a file.',
+        outputSchema: {
+          id: z.string(),
+          name: z.string(),
+          parents: z.array(z.string()).optional(),
+          previousParents: z.array(z.string()).optional(),
+          webViewLink: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder to move.'),
+          new_parent_folder_id: z.string().describe('ID of the destination folder.'),
+          remove_from_current_parents: z
+            .boolean()
+            .optional()
+            .describe('If true (default), remove the item from its current parents — a true move. If false, the item is added to the new folder while staying in its current parents (multi-parent).'),
+          new_name: z.string().optional().describe('Optional new name for the file (rename while moving).'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, new_parent_folder_id, remove_from_current_parents, new_name }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const shouldRemove = remove_from_current_parents !== false; // default true
+
+            // 1. Read current parents so we can build removeParents accurately.
+            const current = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,parents&supportsAllDrives=true`,
+              accessToken,
+            );
+            const previousParents: string[] = current.parents || [];
+
+            const queryParams = new URLSearchParams({
+              addParents: new_parent_folder_id,
+              fields: 'id,name,parents,webViewLink',
+              supportsAllDrives: 'true',
+            });
+            if (shouldRemove && previousParents.length > 0) {
+              // Only remove parents we don't already share with the new parent
+              // — if the item is already in the destination, leave that link.
+              const toRemove = previousParents.filter((p) => p !== new_parent_folder_id);
+              if (toRemove.length > 0) {
+                queryParams.set('removeParents', toRemove.join(','));
+              }
+            }
+
+            const body: any = {};
+            if (new_name) body.name = new_name;
+
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?${queryParams}`,
+              accessToken,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              },
+            );
+
+            const output = {
+              id: result.id,
+              name: result.name,
+              parents: result.parents,
+              previousParents,
+              webViewLink: result.webViewLink,
+              message: shouldRemove ? 'File moved successfully' : 'File added to new folder (kept in original parents)',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      share_file: {
+        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email) or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient.',
+        outputSchema: {
+          permissionId: z.string().optional(),
+          fileId: z.string(),
+          type: z.string(),
+          role: z.string(),
+          emailAddress: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder to share.'),
+          type: z.enum(['user', 'anyone']).describe('"user" to share with a specific email; "anyone" for link-sharing.'),
+          role: z.enum(['reader', 'commenter', 'writer']).describe('Access level to grant. "reader" = view, "commenter" = view+comment, "writer" = edit.'),
+          email: z.string().email().optional().describe('Required when type="user": the recipient email address.'),
+          send_notification: z
+            .boolean()
+            .optional()
+            .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify.'),
+          message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, send_notification, message }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            if (type === 'user' && !email) {
+              return formatDriveError(new Error('email is required when type="user".'));
+            }
+            if (type === 'anyone' && email) {
+              return formatDriveError(new Error('email must be omitted when type="anyone".'));
+            }
+
+            const notify = send_notification === true;
+            const body: any = { type, role };
+            if (type === 'user') body.emailAddress = email;
+
+            const params = new URLSearchParams({
+              fields: 'id,type,role,emailAddress',
+              supportsAllDrives: 'true',
+              sendNotificationEmail: notify ? 'true' : 'false',
+            });
+            if (notify && message) params.set('emailMessage', message);
+
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/permissions?${params}`,
+              accessToken,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              },
+            );
+
+            const output = {
+              permissionId: result.id,
+              fileId: file_id,
+              type: result.type,
+              role: result.role,
+              emailAddress: result.emailAddress,
+              message: type === 'anyone'
+                ? `Anyone with the link can ${role === 'reader' ? 'view' : role === 'commenter' ? 'view and comment on' : 'edit'} this file`
+                : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
     };
   }
 }
