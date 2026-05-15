@@ -330,7 +330,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       copy_file: {
-        description: 'Copy a file in Google Drive',
+        description: 'Duplicate a Drive file. Use this when the user asks to copy/duplicate a file, optionally renaming it or placing the copy in a specific folder. Does NOT work for folders (Drive forbids folder copy); use create_folder + manual re-add for that case.',
         outputSchema: {
           id: z.string(),
           name: z.string(),
@@ -395,7 +395,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       create_folder: {
-        description: 'Create a folder in Google Drive',
+        description: 'Create a new folder in Google Drive. Use this when the user asks to make/create a folder. Optionally nest the folder under an existing parent_folder_id; otherwise it lands in My Drive root.',
         outputSchema: {
           id: z.string(),
           name: z.string(),
@@ -670,8 +670,13 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             if (type === 'anyone' && email) {
               return formatDriveError(new Error('email must be omitted when type="anyone".'));
             }
+            if (type === 'anyone' && send_notification === true) {
+              return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
+            }
 
-            const notify = send_notification === true;
+            // Drive only accepts sendNotificationEmail=true for type=user;
+            // force false for type=anyone to avoid 400s from the API.
+            const notify = type === 'user' && send_notification === true;
             const body: any = { type, role };
             if (type === 'user') body.emailAddress = email;
 
