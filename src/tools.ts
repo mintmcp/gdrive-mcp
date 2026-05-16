@@ -756,16 +756,18 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const { accessToken } = context;
 
           try {
-            // Normalise domain up front — strip whitespace and reject empty.
-            // For non-domain types we still want a trimmed/typed value to test
-            // "was a domain provided where it shouldn't have been".
-            const domainTrimmed = typeof domain === 'string' ? domain.trim() : '';
+            // For "domain must be omitted" checks on type=user/anyone we want
+            // to reject ANY truthy domain (string, number, object, ...) — the
+            // pre-refactor code passed the raw value through `if (normalised)`,
+            // and we preserve that strictness here. For type="domain" we run
+            // the full string-shape validation via validateWorkspaceDomain.
+            const domainPresent = typeof domain === 'string' ? domain.trim().length > 0 : !!domain;
             let normalisedDomain = '';
 
             // Per-type required/forbidden field validation.
             if (type === 'user') {
               if (!email) return formatDriveError(new Error('email is required when type="user".'));
-              if (domainTrimmed) return formatDriveError(new Error('domain must be omitted when type="user".'));
+              if (domainPresent) return formatDriveError(new Error('domain must be omitted when type="user".'));
             } else if (type === 'domain') {
               const v = validateWorkspaceDomain(domain);
               if (!v.ok) return formatDriveError(new Error(v.error));
@@ -776,7 +778,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               }
             } else { // anyone
               if (email) return formatDriveError(new Error('email must be omitted when type="anyone".'));
-              if (domainTrimmed) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
+              if (domainPresent) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
               if (send_notification === true) {
                 return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
               }
