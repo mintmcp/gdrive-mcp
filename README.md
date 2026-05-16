@@ -33,9 +33,13 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Create / copy   | `create_folder` | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`     | Optional rename + destination folder; not for folders.     |
 
-Every tool declares both `inputSchema` and `outputSchema`, returns
-`structuredContent` alongside the text block, and routes errors through a
-single envelope with HTTP status, reason, and a corrective hint.
+Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
+results (metadata, IDs, search hits, text file bodies) return
+`structuredContent` alongside the text block. Binary results from
+`get_file` are returned via MCP image / resource content blocks instead
+(images as `type: "image"`, PDFs as `type: "resource"` with the base64
+payload). Errors route through a single envelope with HTTP status,
+reason, and a corrective hint.
 
 ## Local development
 
