@@ -18,7 +18,7 @@ const TEXTUAL_APPLICATION_MIMES = new Set([
   'application/yaml',
   'application/x-yaml',
 ]);
-function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc' | 'unsupported' {
+export function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc' | 'unsupported' {
   if (!mimeType) return 'unsupported';
   if (mimeType.startsWith('application/vnd.google-apps.')) return 'native-doc';
   if (mimeType === 'application/pdf') return 'pdf';
@@ -26,6 +26,47 @@ function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc'
   if (mimeType.startsWith('text/')) return 'text';
   if (TEXTUAL_APPLICATION_MIMES.has(mimeType)) return 'text';
   return 'unsupported';
+}
+
+/**
+ * Escape a string for safe interpolation inside Google Drive `q` single-quoted
+ * literals. Backslashes are doubled, then internal apostrophes are
+ * backslash-escaped. Used by search_files when stitching a caller-supplied
+ * `mime_type` into the query.
+ */
+export function escapeDriveQValue(value: string): string {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/**
+ * Trivial self-move guard for move_file. The Drive API will eventually reject
+ * cycles, but catching the obvious "move X into X" case up front gives a
+ * cleaner error message and saves a round-trip.
+ */
+export function isSelfMove(fileId: string | undefined, newParentId: string | undefined): boolean {
+  return !!fileId && !!newParentId && fileId === newParentId;
+}
+
+/**
+ * Validate a Google Workspace domain string for share_file. Trims whitespace,
+ * rejects empty/non-string/whitespace-only, and runs the same hostname-shape
+ * regex used by the share_file handler. Returns a discriminated result so
+ * callers can produce structured error envelopes.
+ */
+export function validateWorkspaceDomain(
+  input: unknown,
+): { ok: true; domain: string } | { ok: false; error: string } {
+  if (typeof input !== 'string') {
+    return { ok: false, error: 'domain is required when type="domain" and must not be empty or whitespace.' };
+  }
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'domain is required when type="domain" and must not be empty or whitespace.' };
+  }
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(trimmed)) {
+    return { ok: false, error: `domain "${trimmed}" does not look like a valid Workspace domain (expected e.g. "example.com").` };
+  }
+  return { ok: true, domain: trimmed };
 }
 
 // Retry tuning for transient Drive errors (429 / 5xx).
@@ -55,7 +96,7 @@ export class DriveApiError extends Error {
  * Convert a thrown error into the structured MCP tool error envelope.
  * Adds status-specific hints so the LLM can self-correct.
  */
-function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; structuredContent: any; isError: true } {
+export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; structuredContent: any; isError: true } {
   let status: number | undefined;
   let reason: string | undefined;
   let message: string;
@@ -105,7 +146,7 @@ function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: 
   };
 }
 
-function parseRetryAfter(headerValue: string | null): number | undefined {
+export function parseRetryAfter(headerValue: string | null): number | undefined {
   if (!headerValue) return undefined;
   const trimmed = headerValue.trim();
   // Numeric seconds form.
@@ -121,7 +162,7 @@ function parseRetryAfter(headerValue: string | null): number | undefined {
   return undefined;
 }
 
-function backoffDelayMs(attempt: number): number {
+export function backoffDelayMs(attempt: number): number {
   // attempt is 1-based. exp backoff with ±25% jitter.
   const base = Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS);
   const jitter = base * (Math.random() * 0.5 - 0.25);
@@ -130,7 +171,7 @@ function backoffDelayMs(attempt: number): number {
 
 const RETRY_SAFE_METHODS = new Set(['GET', 'HEAD']);
 
-function isRetryable(status: number, method: string): boolean {
+export function isRetryable(status: number, method: string): boolean {
   if (status === 429) return true; // safe to retry — request was rejected, not processed
   if (status >= 500 && status <= 599) {
     // Only retry idempotent methods on 5xx — writes may have partially succeeded.
@@ -285,7 +326,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             let effectiveQuery = query;
             if (mime_type) {
               // Single-quote-escape mime_type per Drive q grammar.
-              const safeMime = String(mime_type).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+              const safeMime = escapeDriveQValue(String(mime_type));
               effectiveQuery = query && query.trim().length > 0
                 ? `(${query}) and mimeType = '${safeMime}'`
                 : `mimeType = '${safeMime}'`;
@@ -628,7 +669,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             // Cheap circular-move guard: catch the obvious self-move before
             // round-tripping. Deeper cycles (folder into a descendant) need
             // recursive traversal — leave those for Drive to reject.
-            if (file_id && new_parent_folder_id && file_id === new_parent_folder_id) {
+            if (isSelfMove(file_id, new_parent_folder_id)) {
               return formatDriveError(new Error(
                 'Cannot move a file or folder into itself — file_id and new_parent_folder_id are the same.'
               ));
@@ -716,25 +757,26 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
           try {
             // Normalise domain up front — strip whitespace and reject empty.
-            const normalisedDomain = typeof domain === 'string' ? domain.trim() : domain;
+            // For non-domain types we still want a trimmed/typed value to test
+            // "was a domain provided where it shouldn't have been".
+            const domainTrimmed = typeof domain === 'string' ? domain.trim() : '';
+            let normalisedDomain = '';
 
             // Per-type required/forbidden field validation.
             if (type === 'user') {
               if (!email) return formatDriveError(new Error('email is required when type="user".'));
-              if (normalisedDomain) return formatDriveError(new Error('domain must be omitted when type="user".'));
+              if (domainTrimmed) return formatDriveError(new Error('domain must be omitted when type="user".'));
             } else if (type === 'domain') {
-              if (!normalisedDomain) return formatDriveError(new Error('domain is required when type="domain" and must not be empty or whitespace.'));
-              // Cheap shape check: must look roughly like a hostname (label.tld).
-              if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(normalisedDomain)) {
-                return formatDriveError(new Error(`domain "${normalisedDomain}" does not look like a valid Workspace domain (expected e.g. "example.com").`));
-              }
+              const v = validateWorkspaceDomain(domain);
+              if (!v.ok) return formatDriveError(new Error(v.error));
+              normalisedDomain = v.domain;
               if (email) return formatDriveError(new Error('email must be omitted when type="domain".'));
               if (send_notification === true) {
                 return formatDriveError(new Error('send_notification is only valid when type="user" — Drive does not email every member of a domain.'));
               }
             } else { // anyone
               if (email) return formatDriveError(new Error('email must be omitted when type="anyone".'));
-              if (normalisedDomain) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
+              if (domainTrimmed) return formatDriveError(new Error('domain must be omitted when type="anyone".'));
               if (send_notification === true) {
                 return formatDriveError(new Error('send_notification is only valid when type="user" — there is no recipient to notify for link sharing.'));
               }
