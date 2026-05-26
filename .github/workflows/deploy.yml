@@ -1,13 +1,15 @@
 name: Deploy to Fly
 
 on:
+  push:
+    branches: [main]              # auto-deploy prod on merge to main
   workflow_dispatch:
     inputs:
       env:
         description: "Which environment to deploy to"
         type: choice
         options: [staging, prod]
-        default: staging
+        default: prod
 
 permissions:
   id-token: write
@@ -16,11 +18,13 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      TARGET_ENV: ${{ inputs.env || 'prod' }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: mintmcp/mint-fly-deploy@main
         with:
-          env: ${{ inputs.env }}
-          fly-app: ${{ (inputs.env == 'prod') && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
+          env: ${{ env.TARGET_ENV }}
+          fly-app: ${{ env.TARGET_ENV == 'prod' && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
           aws-role-arn: arn:aws:iam::519578939119:role/github-actions-mintmcp-deploy
