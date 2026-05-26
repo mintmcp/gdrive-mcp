@@ -1,0 +1,26 @@
+name: Deploy to Fly
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Which environment to deploy to"
+        type: choice
+        options: [staging, prod]
+        default: staging
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mintmcp/mint-fly-deploy@main
+        with:
+          env: ${{ inputs.env }}
+          fly-app: ${{ (inputs.env == 'prod') && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
+          aws-role-arn: arn:aws:iam::519578939119:role/github-actions-mintmcp-deploy
