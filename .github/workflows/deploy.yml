@@ -27,4 +27,4 @@ jobs:
         with:
           env: ${{ env.TARGET_ENV }}
           fly-app: ${{ env.TARGET_ENV == 'prod' && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
-          aws-role-arn: arn:aws:iam::519578939119:role/github-actions-mintmcp-deploy
+          aws-role-arn: arn:aws:iam::519578939119:role/github-actions-fly-deploy
