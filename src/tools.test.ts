@@ -9,6 +9,8 @@ import {
   isRetryable,
   formatDriveError,
   DriveApiError,
+  formatPermission,
+  formatSharedDrive,
 } from './tools.js';
 
 describe('escapeDriveQValue', () => {
@@ -162,6 +164,51 @@ describe('formatDriveError', () => {
     const e = formatDriveError(new Error('boom'));
     expect(e.structuredContent.error).toBe('boom');
     expect(e.structuredContent.status).toBeUndefined();
+  });
+});
+
+describe('formatPermission', () => {
+  it('surfaces the Drive `id` as `permissionId` and passes fields through', () => {
+    expect(
+      formatPermission({ id: 'p1', type: 'user', role: 'writer', emailAddress: 'a@b.com' }),
+    ).toEqual({
+      permissionId: 'p1',
+      type: 'user',
+      role: 'writer',
+      emailAddress: 'a@b.com',
+      displayName: undefined,
+      domain: undefined,
+      deleted: undefined,
+    });
+  });
+  it('maps domain permissions', () => {
+    expect(formatPermission({ id: 'p2', type: 'domain', role: 'reader', domain: 'example.com' })).toMatchObject({
+      permissionId: 'p2',
+      type: 'domain',
+      role: 'reader',
+      domain: 'example.com',
+    });
+  });
+  it('carries the deleted flag through', () => {
+    expect(formatPermission({ id: 'p3', type: 'user', role: 'reader', deleted: true }).deleted).toBe(true);
+  });
+});
+
+describe('formatSharedDrive', () => {
+  it('whitelists the shared-drive fields and drops unknown keys', () => {
+    expect(
+      formatSharedDrive({ id: 'd1', name: 'Marketing', capabilities: { canEdit: true }, junk: 'ignored' }),
+    ).toEqual({
+      id: 'd1',
+      name: 'Marketing',
+      colorRgb: undefined,
+      createdTime: undefined,
+      hidden: undefined,
+      capabilities: { canEdit: true },
+    });
+  });
+  it('carries the hidden flag through', () => {
+    expect(formatSharedDrive({ id: 'd2', name: 'Archive', hidden: true }).hidden).toBe(true);
   });
 });
 

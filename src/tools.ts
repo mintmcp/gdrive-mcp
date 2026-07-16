@@ -272,6 +272,60 @@ const driveFileSchema = z.object({
   trashed: z.boolean().optional(),
 }).passthrough();
 
+// Tolerant shared-drive shape for list_shared_drives output.
+const sharedDriveSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  colorRgb: z.string().optional(),
+  createdTime: z.string().optional(),
+  hidden: z.boolean().optional(),
+  capabilities: z.record(z.string(), z.boolean()).optional(),
+}).passthrough();
+
+// Tolerant permission shape for list_permissions output.
+const permissionSchema = z.object({
+  permissionId: z.string().optional(),
+  type: z.string().optional(),
+  role: z.string().optional(),
+  emailAddress: z.string().optional(),
+  displayName: z.string().optional(),
+  domain: z.string().optional(),
+  deleted: z.boolean().optional(),
+}).passthrough();
+
+/**
+ * Map a raw Drive permission resource to our output shape. Drive names the
+ * identifier `id`; we surface it as `permissionId` so it lines up with
+ * share_file's output and the permission_id inputs of update_permission /
+ * remove_permission.
+ */
+export function formatPermission(p: any) {
+  return {
+    permissionId: p.id,
+    type: p.type,
+    role: p.role,
+    emailAddress: p.emailAddress,
+    displayName: p.displayName,
+    domain: p.domain,
+    deleted: p.deleted,
+  };
+}
+
+/**
+ * Whitelist a raw Drive shared-drive resource to our output fields. Keeps the
+ * response small and predictable regardless of what the API adds later.
+ */
+export function formatSharedDrive(d: any) {
+  return {
+    id: d.id,
+    name: d.name,
+    colorRgb: d.colorRgb,
+    createdTime: d.createdTime,
+    hidden: d.hidden,
+    capabilities: d.capabilities,
+  };
+}
+
 /**
  * Google Drive Tools class following the same pattern as GoogleCalendarTools
  */
@@ -400,6 +454,66 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             if (result.incompleteSearch === true) {
               output.incompleteSearch = true;
             }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      list_shared_drives: {
+        description: `List the shared drives (Team Drives) the user can access. Shared drives are shared spaces where files are owned by the team rather than an individual. Each drive's id doubles as its top-level folder ID, so it can be passed to search_files as drive_id (or used in a "'DRIVE_ID' in parents" query) to browse its contents. Returns up to 100 drives per page plus a nextPageToken.`,
+        readOnlyHint: true,
+        outputSchema: {
+          drives: z.array(sharedDriveSchema),
+          nextPageToken: z.string().nullable(),
+        },
+        schema: {
+          query: z
+            .string()
+            .optional()
+            .describe(`Optional filter using Google Drive's shared-drive query syntax. Wrap string values in single quotes. Supported fields: name, hidden, createdTime, memberCount, organizerCount. Comparisons: contains, =, !=, <, >, <=, >=. Combine with and, or, not. Examples: name contains 'Marketing'; hidden = false; createdTime > '2024-01-01T00:00:00'.`),
+          use_domain_admin_access: z
+            .boolean()
+            .optional()
+            .describe('Issue the request as a Google Workspace domain administrator to list all shared drives in the domain (requires admin privileges).'),
+          page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ query, use_domain_admin_access, page_token }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const params = new URLSearchParams({
+              pageSize: '100',
+              fields: 'nextPageToken,drives(id,name,colorRgb,createdTime,hidden,capabilities)',
+              ...(query && { q: query }),
+              ...(use_domain_admin_access && { useDomainAdminAccess: 'true' }),
+              ...(page_token && { pageToken: page_token }),
+            });
+
+            let result;
+            try {
+              result = await makeDriveRequest(`/drives?${params}`, accessToken);
+            } catch (error: any) {
+              if (error instanceof DriveApiError && error.status === 400) {
+                // Preserve Drive's own message and point at the one round-2
+                // parameter — the shared-drive q grammar is easy to get wrong.
+                throw new DriveApiError(
+                  `${error.message}. Likely cause: malformed 'query' — use shared-drive q syntax and wrap string values in single quotes. Example: name contains 'Marketing'.`,
+                  400,
+                  error.reason,
+                );
+              }
+              throw error;
+            }
+
+            const output = {
+              drives: (result.drives || []).map(formatSharedDrive),
+              nextPageToken: result.nextPageToken || null,
+            };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,
@@ -752,7 +866,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify. Ignored for type="anyone" and type="domain".'),
           message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive", async ({ file_id, type, role, email, domain, send_notification, message }: any, context: any) => {
           const { accessToken } = context;
 
           try {
@@ -823,6 +937,145 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               emailAddress: result.emailAddress,
               domain: result.domain,
               message: successMessage,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      list_permissions: {
+        description: `List who a Google Drive file or folder is shared with. Use this when the user asks who has access, or to find the permission_id needed by update_permission / remove_permission. Works on any file the user can access, including items in shared drives. Returns up to 100 permissions per page plus a nextPageToken.`,
+        readOnlyHint: true,
+        outputSchema: {
+          permissions: z.array(permissionSchema),
+          nextPageToken: z.string().nullable(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file, folder, or shared drive to inspect.'),
+          use_domain_admin_access: z
+            .boolean()
+            .optional()
+            .describe('Issue the request as a Google Workspace domain administrator (requires admin privileges). Lets an admin read permissions on files they do not personally have access to.'),
+          page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id, use_domain_admin_access, page_token }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const params = new URLSearchParams({
+              pageSize: '100',
+              fields: 'nextPageToken,permissions(id,type,role,emailAddress,displayName,domain,deleted)',
+              supportsAllDrives: 'true',
+              ...(use_domain_admin_access && { useDomainAdminAccess: 'true' }),
+              ...(page_token && { pageToken: page_token }),
+            });
+
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/permissions?${params}`,
+              accessToken,
+            );
+
+            const output = {
+              permissions: (result.permissions || []).map(formatPermission),
+              nextPageToken: result.nextPageToken || null,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      update_permission: {
+        description: `Change the role of an existing permission on a Google Drive file or folder. Use this when the user wants to upgrade or downgrade someone's access (e.g. reader → writer). Call list_permissions first to obtain the permission_id.`,
+        outputSchema: {
+          permissionId: z.string().optional(),
+          fileId: z.string(),
+          type: z.string().optional(),
+          role: z.string().optional(),
+          emailAddress: z.string().optional(),
+          domain: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder.'),
+          permission_id: z.string().describe('ID of the permission to update (from list_permissions).'),
+          role: z.enum(['reader', 'commenter', 'writer']).describe('New access level: reader = view, commenter = view+comment, writer = edit.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive", async ({ file_id, permission_id, role }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const params = new URLSearchParams({
+              supportsAllDrives: 'true',
+              fields: 'id,type,role,emailAddress,domain',
+            });
+
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/permissions/${encodeURIComponent(permission_id)}?${params}`,
+              accessToken,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role }),
+              },
+            );
+
+            const output = {
+              permissionId: result.id,
+              fileId: file_id,
+              type: result.type,
+              role: result.role,
+              emailAddress: result.emailAddress,
+              domain: result.domain,
+              message: `Permission updated to ${role}`,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      remove_permission: {
+        description: `Revoke a permission from a Google Drive file or folder, removing that user/group/domain's access (or turning off link sharing). Use this when the user wants to unshare or stop someone's access. Call list_permissions first to obtain the permission_id. This is destructive — the access is removed immediately.`,
+        destructiveHint: true,
+        outputSchema: {
+          fileId: z.string(),
+          permissionId: z.string(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder.'),
+          permission_id: z.string().describe('ID of the permission to remove (from list_permissions).'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive", async ({ file_id, permission_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/permissions/${encodeURIComponent(permission_id)}?supportsAllDrives=true`,
+              accessToken,
+              {
+                method: 'DELETE',
+              },
+            );
+
+            const output = {
+              fileId: file_id,
+              permissionId: permission_id,
+              message: 'Permission removed successfully',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
