@@ -545,6 +545,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           mimeType: z.string().optional(),
           size: z.number().optional(),
           content: z.string().optional(),
+          webViewLink: z.string().optional(),
         },
         schema: {
           file_id: z.string().describe('The Google Drive file ID (from search_files).'),
@@ -601,16 +602,26 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             }
 
+            const fileMeta = {
+              id: meta.id,
+              name,
+              mimeType,
+              size,
+              webViewLink: meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`,
+            };
+
             if (kind === 'image' || kind === 'pdf') {
               const arrayBuffer = await response.arrayBuffer();
               // Node ≥22 is declared in package.json; Buffer is safe and avoids
               // the O(n²) String.fromCharCode chunking required by btoa.
               const base64Data = Buffer.from(arrayBuffer).toString('base64');
 
+              const metaBlock = { type: 'text' as const, text: JSON.stringify(fileMeta, null, 2) };
+
               if (kind === 'pdf') {
                 return {
                   content: [
-                    { type: 'text' as const, text: JSON.stringify({ id: meta.id, name, mimeType, size }, null, 2) },
+                    metaBlock,
                     {
                       type: 'resource' as const,
                       resource: {
@@ -620,19 +631,22 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
                       },
                     },
                   ],
+                  structuredContent: fileMeta,
                 };
               }
 
               return {
                 content: [
+                  metaBlock,
                   { type: 'image' as const, data: base64Data, mimeType },
                 ],
+                structuredContent: fileMeta,
               };
             }
 
             // kind === 'text'
             const textContent = await response.text();
-            const result = { id: meta.id, name, mimeType, size, content: textContent };
+            const result = { ...fileMeta, content: textContent };
             return {
               content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
               structuredContent: result,

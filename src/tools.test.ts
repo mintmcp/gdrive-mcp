@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   classifyMime,
   escapeDriveQValue,
@@ -10,6 +12,8 @@ import {
   formatDriveError,
   DriveApiError,
 } from './tools.js';
+import { createServer } from './server.js';
+import { requestContext } from './auth.js';
 
 describe('escapeDriveQValue', () => {
   it('escapes apostrophes', () => {
@@ -168,5 +172,52 @@ describe('formatDriveError', () => {
 describe('Buffer base64 round-trip (platform sanity)', () => {
   it('encodes "Hello" to SGVsbG8=', () => {
     expect(Buffer.from(new Uint8Array([72, 101, 108, 108, 111])).toString('base64')).toBe('SGVsbG8=');
+  });
+});
+
+describe('get_file binary path (structuredContent + open/download link)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function callGetFile(fileId: string, mimeType: string, opts: { omitViewLink?: boolean } = {}) {
+    vi.stubGlobal('fetch', vi.fn(async (input: any) => {
+      const url = String(input);
+      if (url.includes('fields=id,name,mimeType,size,webViewLink')) {
+        const meta: any = { id: fileId, name: 'f', mimeType, size: '100' };
+        if (!opts.omitViewLink) meta.webViewLink = `https://drive.google.com/file/d/${fileId}/view`;
+        return new Response(JSON.stringify(meta), { status: 200 });
+      }
+      if (url.includes('alt=media')) return new Response(new Uint8Array([37, 80, 68, 70]).buffer, { status: 200 });
+      throw new Error(`unexpected fetch: ${url}`);
+    }));
+    const server = createServer();
+    const client = new Client({ name: 't', version: '1' });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    await client.connect(ct);
+    return requestContext.run({ accessToken: 'tok' }, () =>
+      client.callTool({ name: 'get_file', arguments: { file_id: fileId } }) as Promise<any>);
+  }
+
+  it('PDF returns structuredContent (no -32602) and surfaces webViewLink in a text block', async () => {
+    const r = await callGetFile('P', 'application/pdf');
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent?.webViewLink).toContain('/view');
+    expect(r.content.some((b: any) => b.type === 'resource')).toBe(true);
+    expect(r.content.find((b: any) => b.type === 'text')?.text).toContain('webViewLink');
+  });
+
+  it('image returns structuredContent and surfaces webViewLink in a text block', async () => {
+    const r = await callGetFile('I', 'image/png');
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent?.webViewLink).toContain('/view');
+    expect(r.content.some((b: any) => b.type === 'image')).toBe(true);
+    // the link must be in readable content too, not just structuredContent
+    expect(r.content.find((b: any) => b.type === 'text')?.text).toContain('webViewLink');
+  });
+
+  it('synthesizes a webViewLink from the file id when Drive omits it', async () => {
+    const r = await callGetFile('NOLINK', 'application/pdf', { omitViewLink: true });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent?.webViewLink).toBe('https://drive.google.com/file/d/NOLINK/view');
   });
 });
