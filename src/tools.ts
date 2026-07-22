@@ -386,14 +386,14 @@ export async function getFileLabels(
           } else {
             // Can't name this choice: surface the raw id so nothing's lost, and flag the miss.
             labels.push(choiceId);
-            error = 'incomplete label resolution';
+            if (!error) error = 'incomplete label resolution';
             console.warn(`getFileLabels: unresolved choice fileId=${fileId} labelId=${label.id}`);
           }
         }
       }
     } catch (e: any) {
       // One label's schema failure shouldn't discard values already collected from others.
-      error = 'incomplete label resolution';
+      if (!error) error = 'incomplete label resolution';
       console.warn(`getFileLabels: label resolve failed fileId=${fileId} labelId=${label.id} error=${e?.message}`);
     }
   }

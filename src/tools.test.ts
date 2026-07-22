@@ -354,4 +354,23 @@ describe('getFileLabels', () => {
     expect(res.labels).toEqual(['Internal']);
     expect(res.error).toBe('incomplete label resolution');
   });
+
+  it('keeps the stronger "label read failed" signal when a later choice is also unresolved', async () => {
+    let page = 0;
+    stubFetch([
+      ['listLabels', () => {
+        page += 1;
+        return page === 1
+          ? jsonResponse({
+              labels: [{ id: 'lbl1', revisionId: 'rev7', fields: { field1: { valueType: 'selection', selection: ['choiceUnknown'] } } }],
+              nextPageToken: 'p2',
+            })
+          : jsonResponse({ error: { message: 'insufficient scope' } }, 403);
+      }],
+      ['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)],
+    ]);
+    const res = await getFileLabels('f1', 'tok');
+    expect(res.labels).toEqual(['choiceUnknown']);
+    expect(res.error).toBe('label read failed');
+  });
 });
