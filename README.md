@@ -21,6 +21,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/userinfo.profile`
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
+- `https://www.googleapis.com/auth/drive.labels.readonly` — for `get_file`'s Drive-label enrichment (resolves selection-choice ids to display names on `_meta.labels`). If absent, label reads fail soft: results carry `labelsError` instead of resolved labels.
 
 ## Tools
 
@@ -49,6 +50,18 @@ npm run dev               # tsx watch
 npm run build && npm start
 npm test                  # vitest unit tests
 npm run smoke             # docker build + boot + tools/list smoke
+```
+
+## Build the image locally
+
+Build the image straight from the repo's `Dockerfile` (from source, on the
+current branch) instead of pulling a published tag — handy for testing a
+branch or verifying a build. Build for `linux/amd64` to match the MintMCP
+runtime (required on Apple Silicon):
+
+```bash
+docker build --platform linux/amd64 -t gdrive-mcp:local .
+docker run --rm -p 8000:8000 gdrive-mcp:local
 ```
 
 ## Docker
