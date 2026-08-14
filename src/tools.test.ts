@@ -9,6 +9,7 @@ import {
   isRetryable,
   formatDriveError,
   DriveApiError,
+  unsupportedMessage,
 } from './tools.js';
 
 describe('escapeDriveQValue', () => {
@@ -58,6 +59,75 @@ describe('classifyMime', () => {
     expect(classifyMime('application/octet-stream')).toBe('unsupported');
     expect(classifyMime('audio/mp3')).toBe('unsupported');
     expect(classifyMime('')).toBe('unsupported');
+  });
+  it('classifies Office formats as unsupported — they are routed, not read here', () => {
+    expect(
+      classifyMime('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    ).toBe('unsupported');
+    expect(
+      classifyMime('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    ).toBe('unsupported');
+  });
+});
+
+describe('unsupportedMessage', () => {
+  const link = 'https://drive.google.com/x';
+
+  it('points Google-native files at the dedicated MCP server', () => {
+    const msg = unsupportedMessage('Budget', 'application/vnd.google-apps.spreadsheet', link);
+    expect(msg).toContain('Google Sheets');
+    expect(msg).toContain(link);
+    // The generic "text, image and PDF" advice is wrong for these — a dedicated
+    // server can read them, so it must not appear.
+    expect(msg).not.toContain('supports text, image and PDF');
+  });
+
+  it('names the right server per Google-native type', () => {
+    expect(unsupportedMessage('D', 'application/vnd.google-apps.document', link)).toContain('Google Docs');
+    expect(unsupportedMessage('S', 'application/vnd.google-apps.presentation', link)).toContain('Google Slides');
+  });
+
+  it('falls back to a generic message for other Google-native types', () => {
+    const msg = unsupportedMessage('F', 'application/vnd.google-apps.form', link);
+    expect(msg).toContain('Google Drive-native');
+    expect(msg).toContain(link);
+  });
+
+  it('routes Office spreadsheets to the Sheets connector', () => {
+    const msg = unsupportedMessage(
+      'book.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      link
+    );
+    expect(msg).toContain('Google Sheets MCP server');
+    expect(msg).toContain(link);
+  });
+
+  it('routes Office documents to the Docs connector', () => {
+    const msg = unsupportedMessage(
+      'notes.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      link
+    );
+    expect(msg).toContain('Google Docs MCP server');
+  });
+
+  it('routes a legacy .doc to the Docs connector, which now parses it', () => {
+    const msg = unsupportedMessage('old.doc', 'application/msword', link);
+    expect(msg).toContain('Google Docs MCP server');
+    expect(msg).not.toContain('cannot be read');
+  });
+
+  it('still tells the caller a legacy .xls must be converted', () => {
+    expect(unsupportedMessage('old.xls', 'application/vnd.ms-excel', link))
+      .toContain('Save as Google Sheets');
+  });
+
+  it('explains the supported kinds for ordinary binary files', () => {
+    const msg = unsupportedMessage('clip.mp4', 'video/mp4', link);
+    expect(msg).toContain('video/mp4');
+    expect(msg).toContain('text, image and PDF');
+    expect(msg).toContain(link);
   });
 });
 

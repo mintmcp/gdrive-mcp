@@ -29,6 +29,43 @@ export function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'nati
   return 'unsupported';
 }
 
+const GOOGLE_NATIVE_SERVERS: Record<string, string> = {
+  'application/vnd.google-apps.document': 'Google Docs',
+  'application/vnd.google-apps.spreadsheet': 'Google Sheets',
+  'application/vnd.google-apps.presentation': 'Google Slides',
+};
+
+// Readable elsewhere, so route rather than give the generic wrong-type message.
+const OFFICE_ROUTES: Record<string, string> = {
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+    'This is an Excel spreadsheet — use the Google Sheets MCP server to read it.',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+    'This is a Word document — use the Google Docs MCP server to read it.',
+  'application/vnd.ms-excel':
+    'This is a legacy Excel (.xls) file, which cannot be read directly. Open it and use File → Save as Google Sheets first.',
+  'application/msword':
+    'This is a legacy Word (.doc) file — use the Google Docs MCP server to read it.',
+};
+
+/**
+ * Message for a file get_file cannot read. Office and Google-native files are
+ * readable by a sibling connector, so they get a pointer to the right server
+ * instead of the generic "wrong file type" advice.
+ */
+export function unsupportedMessage(name: string, mimeType: string, webViewLink: string): string {
+  const office = OFFICE_ROUTES[mimeType];
+  if (office) return `'${name}': ${office} Open it directly: ${webViewLink}`;
+
+  const service = GOOGLE_NATIVE_SERVERS[mimeType];
+  if (service) {
+    return `'${name}' is a ${service} file, which this connector cannot read. Use the ${service} MCP server to read its contents, or open it directly: ${webViewLink}`;
+  }
+  if (mimeType.startsWith('application/vnd.google-apps.')) {
+    return `'${name}' is a Google Drive-native file ('${mimeType}') with no downloadable contents. Open it directly: ${webViewLink}`;
+  }
+  return `File '${name}' has unsupported mimeType '${mimeType}'. This tool supports text, image and PDF files. Open it directly: ${webViewLink}`;
+}
+
 /**
  * Escape a string for safe interpolation inside Google Drive `q` single-quoted
  * literals. Backslashes are doubled, then internal apostrophes are
@@ -572,27 +609,17 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             const size = meta.size ? parseInt(meta.size) : 0;
             const name: string = meta.name || '';
             const kind = classifyMime(mimeType);
+            const webViewLink: string =
+              meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
 
-            if (kind === 'native-doc') {
-              return formatDriveError(new Error(
-                `File '${name}' is a Google-native document (${mimeType}) and is not supported by this server. ` +
-                `Use the dedicated MCP server: Google Docs for .document, Google Sheets for .spreadsheet, ` +
-                `Google Slides for .presentation. Open in browser: ${meta.webViewLink || 'n/a'}.`
-              ));
-            }
-
-            if (kind === 'unsupported') {
-              return formatDriveError(new Error(
-                `File '${name}' has unsupported mimeType '${mimeType}'. ` +
-                `This tool supports text/*, application/json|xml|javascript|yaml, image/*, and application/pdf. ` +
-                `Open in browser: ${meta.webViewLink || 'n/a'}.`
-              ));
+            if (kind === 'native-doc' || kind === 'unsupported') {
+              return formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink)));
             }
 
             if (size > MAX_FILE_SIZE) {
               return formatDriveError(new Error(
                 `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
-                `Open in browser instead: ${meta.webViewLink || 'n/a'}.`
+                `Open in browser instead: ${webViewLink}.`
               ));
             }
 
@@ -610,8 +637,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             }
 
-            const webViewLink: string =
-              meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
             const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
             const jsonBlock = (payload: unknown) => ({
               type: 'text' as const,
