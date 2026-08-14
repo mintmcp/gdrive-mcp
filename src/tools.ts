@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
+import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 
 const GOOGLE_DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
@@ -537,14 +538,22 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       get_file: {
-        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use the dedicated MCP servers for those.',
+        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. PDFs with a text layer are returned as readable text in `content`. Scanned/image-only PDFs have no text to extract: the result says so and carries `scanned: true` plus a `webViewLink` to open the file, rather than returning unreadable bytes. `extraction` tells you which branch produced the result. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use the dedicated MCP servers for those. Files over 20MB, unsupported mime types and Google-native docs are reported as tool errors, not results.',
         readOnlyHint: true,
         outputSchema: {
           id: z.string().optional(),
           name: z.string().optional(),
           mimeType: z.string().optional(),
           size: z.number().optional(),
-          content: z.string().optional(),
+          webViewLink: z.string().optional(),
+          // Which branch produced this result; everything below varies with it.
+          extraction: z.enum(['text', 'image', 'scanned', 'failed']).optional(),
+          content: z.string().optional().describe('File text, for text files and PDFs with a text layer'),
+          pages: z.number().optional().describe('PDF page count'),
+          textPages: z.number().optional().describe('PDF pages carrying a text layer'),
+          scanned: z.boolean().optional().describe('True when a PDF is image-only'),
+          truncated: z.boolean().optional(),
+          message: z.string().optional().describe('Why content is absent or partial'),
         },
         schema: {
           file_id: z.string().describe('The Google Drive file ID (from search_files).'),
@@ -601,40 +610,97 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             }
 
-            if (kind === 'image' || kind === 'pdf') {
+            const webViewLink: string =
+              meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
+            const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
+            const jsonBlock = (payload: unknown) => ({
+              type: 'text' as const,
+              text: JSON.stringify(payload, null, 2),
+            });
+
+            if (kind === 'pdf') {
+              const arrayBuffer = await response.arrayBuffer();
+              let pdfText: PdfText | undefined;
+              let failure: string | undefined;
+              const startedAt = Date.now();
+              try {
+                pdfText = await extractPdfText(new Uint8Array(arrayBuffer));
+              } catch (err: any) {
+                failure = err?.message || 'the PDF could not be parsed';
+                console.error(
+                  `[gdrive-hosted] get_file: pdf text extraction failed fileId=${file_id} ` +
+                  `bytes=${arrayBuffer.byteLength} type=${err?.name || typeof err} ` +
+                  `elapsedMs=${Date.now() - startedAt} error=${err?.message}`
+                );
+              }
+
+              let result: Record<string, unknown>;
+              if (!pdfText) {
+                result = {
+                  ...fileMeta,
+                  extraction: 'failed',
+                  message: `Could not extract text from '${name}' because ${failure}. Open the file directly instead: ${webViewLink}`,
+                };
+              } else if (pdfText.scanned) {
+                result = {
+                  ...fileMeta,
+                  extraction: 'scanned',
+                  pages: pdfText.pages,
+                  textPages: pdfText.textPages,
+                  scanned: true,
+                  message:
+                    `'${name}' is a scanned (image-only) PDF with ${pdfText.pages} page(s) and no text layer, ` +
+                    `so there is no text to extract. Reading its contents would require rendering each page as ` +
+                    `an image, which consumes a large number of tokens and is not supported by this connector. ` +
+                    `Open the file directly instead: ${webViewLink}`,
+                };
+              } else {
+                const notes: string[] = [];
+                if (pdfText.textPages < pdfText.pages) {
+                  notes.push(
+                    `only ${pdfText.textPages} of ${pdfText.pages} page(s) carry a text layer; ` +
+                    `the rest appear to be scanned images and are not included`
+                  );
+                }
+                if (pdfText.truncated) {
+                  notes.push(`the text was truncated at ${MAX_TEXT_CHARS} characters`);
+                }
+                result = {
+                  ...fileMeta,
+                  extraction: 'text',
+                  content: pdfText.text,
+                  pages: pdfText.pages,
+                  textPages: pdfText.textPages,
+                  ...(pdfText.truncated ? { truncated: true } : {}),
+                  ...(notes.length
+                    ? { message: `Note: ${notes.join('; ')}. Full file: ${webViewLink}` }
+                    : {}),
+                };
+              }
+
+              return { content: [jsonBlock(result)], structuredContent: result };
+            }
+
+            if (kind === 'image') {
               const arrayBuffer = await response.arrayBuffer();
               // Node ≥22 is declared in package.json; Buffer is safe and avoids
               // the O(n²) String.fromCharCode chunking required by btoa.
               const base64Data = Buffer.from(arrayBuffer).toString('base64');
-
-              if (kind === 'pdf') {
-                return {
-                  content: [
-                    { type: 'text' as const, text: JSON.stringify({ id: meta.id, name, mimeType, size }, null, 2) },
-                    {
-                      type: 'resource' as const,
-                      resource: {
-                        uri: `gdrive://file/${meta.id}`,
-                        mimeType,
-                        blob: base64Data,
-                      },
-                    },
-                  ],
-                };
-              }
-
+              const imageMeta = { ...fileMeta, extraction: 'image' as const };
               return {
                 content: [
+                  jsonBlock(imageMeta),
                   { type: 'image' as const, data: base64Data, mimeType },
                 ],
+                structuredContent: imageMeta,
               };
             }
 
             // kind === 'text'
             const textContent = await response.text();
-            const result = { id: meta.id, name, mimeType, size, content: textContent };
+            const result = { ...fileMeta, extraction: 'text' as const, content: textContent };
             return {
-              content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+              content: [jsonBlock(result)],
               structuredContent: result,
             };
           } catch (err) {
