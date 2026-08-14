@@ -2,14 +2,9 @@ name: Deploy to Fly
 
 on:
   push:
-    branches: [main]              # auto-deploy prod on merge to main
+    branches: [main]              # auto-deploy staging on merge to main
+    tags: ["v*"]                  # tag deploys a versioned prod app
   workflow_dispatch:
-    inputs:
-      env:
-        description: "Which environment to deploy to"
-        type: choice
-        options: [staging, prod]
-        default: prod
 
 permissions:
   id-token: write
@@ -18,13 +13,40 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      TARGET_ENV: ${{ inputs.env || 'prod' }}
     steps:
       - uses: actions/checkout@v4
 
+      # Fly app names reject dots, so tag v0.1.0 becomes gdrive-v0-1-0-mintmcp.
+      # Every released version keeps its own app forever so customers already
+      # connected stay on the URL they were given
+      - id: target
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+            echo "app=gdrive-mintmcp-staging" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! printf '%s' "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: tag '$GITHUB_REF_NAME' is not a release version" >&2
+            echo "       expected semver, e.g. v0.1.0" >&2
+            exit 2
+          fi
+
+          # The app name advertises a version, so the image behind that URL has
+          # to carry the same one
+          PKG_VERSION=$(jq -r .version package.json)
+          if [ "$GITHUB_REF_NAME" != "v${PKG_VERSION}" ]; then
+            echo "error: tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'" >&2
+            echo "       bump package.json to ${GITHUB_REF_NAME#v} and retag" >&2
+            exit 2
+          fi
+
+          echo "env=prod" >> "$GITHUB_OUTPUT"
+          echo "app=gdrive-${GITHUB_REF_NAME//./-}-mintmcp" >> "$GITHUB_OUTPUT"
+
       - uses: mintmcp/mint-fly-deploy@main
         with:
-          env: ${{ env.TARGET_ENV }}
-          fly-app: ${{ env.TARGET_ENV == 'prod' && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
+          env: ${{ steps.target.outputs.env }}
+          fly-app: ${{ steps.target.outputs.app }}
           aws-role-arn: arn:aws:iam::519578939119:role/github-actions-fly-deploy
