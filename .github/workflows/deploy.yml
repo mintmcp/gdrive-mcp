@@ -3,7 +3,7 @@ name: Deploy to Fly
 on:
   push:
     branches: [main]              # auto-deploy staging on merge to main
-    tags: ["v*"]                  # tag deploys a versioned prod app
+    tags: ["v*"]                  # tag deploys prod
   workflow_dispatch:
 
 permissions:
@@ -16,9 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Fly app names reject dots, so tag v0.1.0 becomes gdrive-v0-1-0-mintmcp.
-      # Every released version keeps its own app forever so customers already
-      # connected stay on the URL they were given
+      # The app name pins the major only: minor and patch redeploy the same app
+      # so connected customers keep their URL, a new major gets a new app
       - id: target
         run: |
           if [ "$GITHUB_REF_TYPE" != tag ]; then
@@ -33,8 +32,6 @@ jobs:
             exit 2
           fi
 
-          # The app name advertises a version, so the image behind that URL has
-          # to carry the same one
           PKG_VERSION=$(jq -r .version package.json)
           if [ "$GITHUB_REF_NAME" != "v${PKG_VERSION}" ]; then
             echo "error: tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'" >&2
@@ -42,8 +39,10 @@ jobs:
             exit 2
           fi
 
+          MAJOR=${GITHUB_REF_NAME%%.*}
+
           echo "env=prod" >> "$GITHUB_OUTPUT"
-          echo "app=gdrive-${GITHUB_REF_NAME//./-}-mintmcp" >> "$GITHUB_OUTPUT"
+          echo "app=gdrive-${MAJOR}-mintmcp" >> "$GITHUB_OUTPUT"
 
       - uses: mintmcp/mint-fly-deploy@main
         with:
