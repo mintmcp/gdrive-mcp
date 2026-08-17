@@ -90,12 +90,20 @@ prod to a new URL.
 
 ### When to bump major
 
-Bump the major **when, and only when, the required Google OAuth scopes
-change** (the list under [Auth contract](#auth-contract)). A scope change
-means a new MintMCP connector and a re-consent, so existing customers cannot
-be carried forward — they need a new endpoint, and the old one has to keep
-serving them until they migrate. Everything else (new tools inside the
-existing scopes, bug fixes, perf) is a minor or patch.
+Bump the major when either of these changes in a way existing clients can't
+absorb:
+
+- **The required Google OAuth scopes** (the list under
+  [Auth contract](#auth-contract)). A scope change means a new MintMCP
+  connector and a re-consent, so existing customers can't be carried forward
+  — they need a new endpoint, and the old one has to keep serving them until
+  they migrate.
+- **A tool's input or output contract**, when the change is not backwards
+  compatible — removing a parameter, renaming a field, tightening what's
+  accepted. Callers written against the old shape break.
+
+Everything else (new tools inside the existing scopes, additive optional
+parameters, bug fixes, perf) is a minor or patch.
 
 ### Cutting a release
 
