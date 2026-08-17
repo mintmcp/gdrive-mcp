@@ -70,8 +70,48 @@ docker run --rm -p 8000:8000 mintmcp/gdrive-mcp:latest
 ```bash
 hosted-cli build-and-push \
   --image mintmcp/gdrive-mcp \
-  --tag 0.1.0
+  --tag 1.0.0
 ```
+
+## Releases and deploys
+
+`.github/workflows/deploy.yml` picks the Fly app from the ref:
+
+| Trigger                    | Env     | Fly app                  |
+|----------------------------|---------|--------------------------|
+| push to `main`             | staging | `gdrive-mintmcp-staging` |
+| tag `v1.x.y`               | prod    | `gdrive-v1-mintmcp`      |
+| tag `v2.x.y`               | prod    | `gdrive-v2-mintmcp`      |
+
+**The prod app name pins the major only.** Minor and patch releases redeploy
+the same app, so customers already connected to `gdrive-v1-mintmcp.fly.dev`
+keep their URL and their connector. A new major is the only thing that moves
+prod to a new URL.
+
+### When to bump major
+
+Bump the major **when, and only when, the required Google OAuth scopes
+change** (the list under [Auth contract](#auth-contract)). A scope change
+means a new MintMCP connector and a re-consent, so existing customers cannot
+be carried forward — they need a new endpoint, and the old one has to keep
+serving them until they migrate. Everything else (new tools inside the
+existing scopes, bug fixes, perf) is a minor or patch.
+
+### Cutting a release
+
+```bash
+npm version 1.0.0 --no-git-tag-version   # updates package.json + lock
+git commit -am "release: v1.0.0"
+# merge to main, then:
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+The workflow refuses a tag that isn't `vX.Y.Z` or that doesn't match
+`package.json`'s `version`, so the tag and the shipped image can't drift.
+
+> `gdrive-mintmcp` (unversioned) is the pre-1.0 prod app. It predates the
+> `drive.file` scope and no longer receives deploys — leave it running for
+> customers on the old connector until they've moved to `gdrive-v1-mintmcp`.
 
 ## Sanity-check the running container
 
