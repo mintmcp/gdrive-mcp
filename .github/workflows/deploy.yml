@@ -2,29 +2,67 @@ name: Deploy to Fly
 
 on:
   push:
-    branches: [main]              # auto-deploy prod on merge to main
+    branches: [main]              # merge to main auto-deploys staging
+    tags: ["v*"]                  # a release tag deploys prod
   workflow_dispatch:
-    inputs:
-      env:
-        description: "Which environment to deploy to"
-        type: choice
-        options: [staging, prod]
-        default: prod
 
 permissions:
   id-token: write
   contents: read
 
+# Serialize prod deploys against each other (and staging against itself) so two
+# tags pushed back to back can't race on the same Fly app.
+concurrency:
+  group: deploy-${{ github.ref_type == 'tag' && 'prod' || 'staging' }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      TARGET_ENV: ${{ inputs.env || 'prod' }}
     steps:
       - uses: actions/checkout@v4
 
+      # The prod app name pins the MAJOR only. Minor and patch tags redeploy the
+      # same app, so already-connected customers keep their URL. A new major gets
+      # a brand new app at a brand new URL — which is the whole point: we only
+      # bump major when the required Google OAuth scopes change, and a scope
+      # change means a new MintMCP connector that customers must reconnect to.
+      #
+      #   v1.0.0, v1.1.0, v1.4.2  ->  gdrive-v1-mintmcp.fly.dev
+      #   v2.0.0, v2.0.1          ->  gdrive-v2-mintmcp.fly.dev
+      - id: target
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+            echo "app=gdrive-mintmcp-staging" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! printf '%s' "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: tag '$GITHUB_REF_NAME' is not a release version" >&2
+            echo "       expected semver, e.g. v1.0.0" >&2
+            exit 2
+          fi
+
+          PKG_VERSION=$(jq -r .version package.json)
+          if [ "$GITHUB_REF_NAME" != "v${PKG_VERSION}" ]; then
+            echo "error: tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'" >&2
+            echo "       bump package.json to ${GITHUB_REF_NAME#v} and retag" >&2
+            exit 2
+          fi
+
+          MAJOR=${GITHUB_REF_NAME%%.*}
+
+          echo "env=prod" >> "$GITHUB_OUTPUT"
+          echo "app=gdrive-${MAJOR}-mintmcp" >> "$GITHUB_OUTPUT"
+
+      - run: |
+          echo "Deploying **${{ steps.target.outputs.env }}** to \`${{ steps.target.outputs.app }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://${{ steps.target.outputs.app }}.fly.dev/mcp" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: mintmcp/mint-fly-deploy@main
         with:
-          env: ${{ env.TARGET_ENV }}
-          fly-app: ${{ env.TARGET_ENV == 'prod' && 'gdrive-mintmcp' || 'gdrive-mintmcp-staging' }}
+          env: ${{ steps.target.outputs.env }}
+          fly-app: ${{ steps.target.outputs.app }}
           aws-role-arn: arn:aws:iam::519578939119:role/github-actions-fly-deploy
