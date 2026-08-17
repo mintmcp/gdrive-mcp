@@ -735,8 +735,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       move_file: {
-        description: 'Move a file or folder into a different parent folder in Google Drive. The item is removed from its previous parents (true Drive "move" semantics); Drive no longer supports keeping a file in several folders at once. Also supports an optional rename via new_name. Use this when the user asks to move, relocate, or reorganise a file.',
-        destructiveHint: true,
+        description: 'Move a file or folder into a different parent folder in Google Drive. By default the item is removed from its previous parents (true Drive "move" semantics). Also supports an optional rename via new_name. Use this when the user asks to move, relocate, or reorganise a file.',
         outputSchema: {
           id: z.string(),
           name: z.string(),
@@ -748,9 +747,13 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         schema: {
           file_id: z.string().describe('ID of the file or folder to move.'),
           new_parent_folder_id: z.string().describe('ID of the destination folder.'),
+          remove_from_current_parents: z
+            .boolean()
+            .optional()
+            .describe('If true (default), remove the item from its current parents — a true move. If false, the item is added to the new folder while staying in its current parents (multi-parent).'),
           new_name: z.string().optional().describe('Optional new name for the file (rename while moving).'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, new_parent_folder_id, new_name }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, new_parent_folder_id, remove_from_current_parents, new_name }: any, context: any) => {
           const { accessToken } = context;
 
           try {
@@ -762,6 +765,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
                 'Cannot move a file or folder into itself — file_id and new_parent_folder_id are the same.'
               ));
             }
+
+            const shouldRemove = remove_from_current_parents !== false; // default true
 
             // 1. Read current parents so we can build removeParents accurately.
             const current = await makeDriveRequest(
@@ -775,11 +780,13 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               fields: 'id,name,parents,webViewLink',
               supportsAllDrives: 'true',
             });
-            // Only remove parents we don't already share with the new parent
-            // — if the item is already in the destination, leave that link.
-            const toRemove = previousParents.filter((p) => p !== new_parent_folder_id);
-            if (toRemove.length > 0) {
-              queryParams.set('removeParents', toRemove.join(','));
+            if (shouldRemove && previousParents.length > 0) {
+              // Only remove parents we don't already share with the new parent
+              // — if the item is already in the destination, leave that link.
+              const toRemove = previousParents.filter((p) => p !== new_parent_folder_id);
+              if (toRemove.length > 0) {
+                queryParams.set('removeParents', toRemove.join(','));
+              }
             }
 
             const body: any = {};
@@ -801,7 +808,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               parents: result.parents,
               previousParents,
               webViewLink: result.webViewLink,
-              message: 'File moved successfully',
+              message: shouldRemove ? 'File moved successfully' : 'File added to new folder (kept in original parents)',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
