@@ -28,7 +28,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 |-----------------|-----------------|------------------------------------------------------------|
 | Search / find   | `search_files`  | Drive `q` syntax + optional `mime_type` and `drive_id`.    |
 | Read / get      | `get_file`      | Up to 20MB; text / image / pdf. Rejects Google-native docs.|
-| Move / share    | `move_file`     | True move; removes the item from its previous parents.     |
+| Move / share    | `move_file`     | True move (removes from old parents) or multi-parent add.  |
 |                 | `share_file`    | user / domain / anyone permissions; no email by default.   |
 | Create / copy   | `create_folder` | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`     | Optional rename + destination folder; not for folders.     |
