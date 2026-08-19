@@ -19,7 +19,7 @@ set -euo pipefail
 IMG="${SMOKE_IMAGE:-gdrive-mcp-smoke:test}"
 PORT="${SMOKE_PORT:-18000}"
 NAME="gdrive-mcp-smoke-$$"
-EXPECTED_TOOL_COUNT=6
+EXPECTED_TOOL_COUNT=11
 
 cleanup() {
   docker stop "$NAME" >/dev/null 2>&1 || true
