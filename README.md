@@ -25,15 +25,20 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 
 ## Tools
 
-| Category        | Tool            | Notes                                                      |
-|-----------------|-----------------|------------------------------------------------------------|
-| Search / find   | `search_files`  | Drive `q` syntax + optional `mime_type` and `drive_id`.    |
-| Read / get      | `get_file`      | Up to 20MB; text / image / pdf. Rejects Google-native docs.|
-| Move / share    | `move_file`     | True move; removes the item from its previous parents.     |
-|                 | `share_file`    | user / domain / anyone permissions; no email by default.   |
-| Create / copy   | `create_folder` | Optional `parent_folder_id` for nesting.                   |
-|                 | `copy_file`     | Optional rename + destination folder; not for folders.     |
-| Upload          | `upload_file`   | Text or base64 content; optional convert to a Google type. |
+| Category        | Tool                   | Notes                                                      |
+|-----------------|------------------------|------------------------------------------------------------|
+| Search / find   | `search_files`         | Drive `q` syntax + optional `mime_type` and `drive_id`.    |
+|                 | `list_recent_files`    | Most recently modified files, newest first; excludes folders/trash. |
+| Read / get      | `get_file`             | Up to 20MB; text / image / pdf. Rejects Google-native docs.|
+|                 | `get_file_metadata`    | Full metadata for any file/folder; no download.            |
+|                 | `get_file_permissions` | Lists who has access and at what role.                     |
+| Move / share    | `move_file`            | True move; removes the item from its previous parents.     |
+|                 | `share_file`           | user / domain / anyone permissions; no email by default.   |
+|                 | `update_file`          | Rename / set description / star; metadata only.            |
+|                 | `trash_file`           | Reversible move to trash (not a permanent delete).         |
+| Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
+|                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
+| Upload          | `upload_file`          | Text or base64 content; optional convert to a Google type. |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
 results (metadata, IDs, search hits, text file bodies) return
@@ -109,7 +114,7 @@ curl -s -X POST http://localhost:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer fake-token" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
-# lists the tools the active profile registers (all 7 when PROFILE is unset)
+# lists the tools the active profile registers (all 12 when PROFILE is unset)
 ```
 
 A fake token returns a structured 401 from the Drive API (with a "reconnect

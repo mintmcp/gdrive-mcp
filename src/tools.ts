@@ -323,11 +323,55 @@ export function buildMultipartBody(
   ]);
 }
 
+/**
+ * Build the PATCH body for update_file from the optional metadata fields.
+ * Returns a discriminated result so the handler can reject a no-op update
+ * before the round-trip — Drive accepts an empty PATCH, but an update with
+ * nothing to change is almost always a caller mistake. The zod schema already
+ * enforces the field types; the real work here is the "at least one field"
+ * guard, which zod can't express across independent optionals.
+ */
+export function buildFileUpdate(args: {
+  new_name?: unknown;
+  description?: unknown;
+  starred?: unknown;
+}): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+  const body: Record<string, unknown> = {};
+
+  if (args.new_name !== undefined) {
+    if (typeof args.new_name !== 'string' || args.new_name.trim().length === 0) {
+      return { ok: false, error: 'new_name must be a non-empty string when provided.' };
+    }
+    body.name = args.new_name;
+  }
+  if (args.description !== undefined) {
+    if (typeof args.description !== 'string') {
+      return { ok: false, error: 'description must be a string when provided.' };
+    }
+    body.description = args.description;
+  }
+  if (args.starred !== undefined) {
+    if (typeof args.starred !== 'boolean') {
+      return { ok: false, error: 'starred must be a boolean when provided.' };
+    }
+    body.starred = args.starred;
+  }
+
+  if (Object.keys(body).length === 0) {
+    return { ok: false, error: 'Provide at least one field to update: new_name, description, or starred.' };
+  }
+  return { ok: true, body };
+}
+
 // Retry tuning for transient Drive errors (429 / 5xx).
 const MAX_RETRY_ATTEMPTS = 3;          // total attempts including the first
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 4000;
 const MAX_RETRY_AFTER_MS = 30_000;     // cap server-supplied Retry-After
+
+// Bound get_file_permissions pagination by page COUNT, not just token presence,
+// so a buggy/repeating nextPageToken from Drive can't spin forever.
+const MAX_PERMISSION_PAGES = 10;
 
 /**
  * Typed error thrown by makeDriveRequest. Carries the HTTP status so
@@ -529,6 +573,47 @@ const driveFileSchema = z.object({
 }).passthrough();
 
 /**
+ * Shared normaliser for a raw Drive file resource into the 11 base fields.
+ * Extracted so the mapping is unit-testable in isolation and not duplicated
+ * across search_files, list_recent_files and get_file_metadata.
+ */
+// Kept in lockstep with formatDriveFile: this mask must request exactly the
+// fields formatDriveFile reads. search_files and list_recent_files share it so
+// adding a field is a one-place change.
+const DRIVE_FILE_LIST_FIELDS =
+  'nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed)';
+
+export function formatDriveFile(file: any) {
+  return {
+    id: file.id,
+    name: file.name,
+    mimeType: file.mimeType,
+    size: file.size ? parseInt(file.size) : undefined,
+    createdTime: file.createdTime,
+    modifiedTime: file.modifiedTime,
+    parents: file.parents,
+    webViewLink: file.webViewLink,
+    owner: file.owners?.[0]?.emailAddress,
+    isFolder: file.mimeType === 'application/vnd.google-apps.folder',
+    trashed: file.trashed === true,
+  };
+}
+
+// Permission entries returned by get_file_permissions. Tolerant like
+// driveFileSchema — Drive omits fields that don't apply to a permission's type
+// (e.g. no emailAddress on a "domain" or "anyone" permission).
+const permissionSchema = z.object({
+  id: z.string().optional(),
+  type: z.string().optional(),
+  role: z.string().optional(),
+  emailAddress: z.string().optional(),
+  domain: z.string().optional(),
+  displayName: z.string().optional(),
+  deleted: z.boolean().optional(),
+  expirationTime: z.string().optional(),
+}).passthrough();
+
+/**
  * Google Drive Tools class following the same pattern as GoogleCalendarTools
  */
 export class GoogleDriveTools {
@@ -591,7 +676,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             const params = new URLSearchParams({
               pageSize: String(effectivePageSize),
-              fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed,driveId)',
+              fields: DRIVE_FILE_LIST_FIELDS,
               supportsAllDrives: 'true',
               includeItemsFromAllDrives: 'true',
               q: effectiveQuery,
@@ -633,19 +718,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             // Format the response
             const files = result.files || [];
-            const formattedFiles = files.map((file: any) => ({
-              id: file.id,
-              name: file.name,
-              mimeType: file.mimeType,
-              size: file.size ? parseInt(file.size) : undefined,
-              createdTime: file.createdTime,
-              modifiedTime: file.modifiedTime,
-              parents: file.parents,
-              webViewLink: file.webViewLink,
-              owner: file.owners?.[0]?.emailAddress,
-              isFolder: file.mimeType === 'application/vnd.google-apps.folder',
-              trashed: file.trashed === true,
-            }));
+            const formattedFiles = files.map(formatDriveFile);
 
             const output: any = {
               files: formattedFiles,
@@ -1276,6 +1349,283 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               emailAddress: result.emailAddress,
               domain: result.domain,
               message: successMessage,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      get_file_metadata: {
+        description: 'Fetch the full metadata for a single Google Drive file or folder without downloading its contents. Use this when the user wants details about a file (owner, size, timestamps, parents, sharing state, description, starred) rather than the file body — for the body use get_file. Works for every file type, including Google-native docs and folders.',
+        readOnlyHint: true,
+        outputSchema: {
+          id: z.string().optional(),
+          name: z.string().optional(),
+          mimeType: z.string().optional(),
+          size: z.number().optional(),
+          createdTime: z.string().optional(),
+          modifiedTime: z.string().optional(),
+          parents: z.array(z.string()).optional(),
+          webViewLink: z.string().optional(),
+          owner: z.string().optional(),
+          isFolder: z.boolean().optional(),
+          trashed: z.boolean().optional(),
+          starred: z.boolean().optional(),
+          shared: z.boolean().optional(),
+          description: z.string().optional(),
+          version: z.string().optional(),
+          md5Checksum: z.string().optional(),
+          driveId: z.string().optional(),
+          lastModifyingUser: z.string().optional(),
+          iconLink: z.string().optional(),
+          thumbnailLink: z.string().optional(),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file or folder ID (from search_files).'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const fields = [
+              'id', 'name', 'mimeType', 'size', 'createdTime', 'modifiedTime',
+              'parents', 'webViewLink', 'owners', 'trashed', 'starred', 'shared',
+              'description', 'version', 'md5Checksum', 'driveId',
+              'lastModifyingUser', 'iconLink', 'thumbnailLink',
+            ].join(',');
+
+            const meta = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=${fields}&supportsAllDrives=true`,
+              accessToken,
+            );
+
+            const output = {
+              ...formatDriveFile(meta),
+              starred: meta.starred === true,
+              shared: meta.shared === true,
+              description: meta.description,
+              version: meta.version,
+              md5Checksum: meta.md5Checksum,
+              driveId: meta.driveId,
+              lastModifyingUser: meta.lastModifyingUser?.emailAddress,
+              iconLink: meta.iconLink,
+              thumbnailLink: meta.thumbnailLink,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      get_file_permissions: {
+        description: 'List the permissions (who has access and at what role) on a Google Drive file or folder. Use this to see how an item is shared — the users, groups, domains, or "anyone" links that can view/comment/edit it. Read-only; to grant access use share_file.',
+        readOnlyHint: true,
+        outputSchema: {
+          fileId: z.string(),
+          permissions: z.array(permissionSchema),
+          incomplete: z.boolean().optional(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder whose permissions to list.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const permissions: any[] = [];
+            let pageToken: string | undefined;
+            let pages = 0;
+            do {
+              const params = new URLSearchParams({
+                fields: 'nextPageToken,permissions(id,type,role,emailAddress,domain,displayName,deleted,expirationTime)',
+                supportsAllDrives: 'true',
+                pageSize: '100',
+                ...(pageToken && { pageToken }),
+              });
+
+              const result = await makeDriveRequest(
+                `/files/${encodeURIComponent(file_id)}/permissions?${params}`,
+                accessToken,
+              );
+
+              permissions.push(...(result?.permissions || []));
+              pageToken = result?.nextPageToken || undefined;
+              pages++;
+            } while (pageToken && pages < MAX_PERMISSION_PAGES);
+
+            const output: any = {
+              fileId: file_id,
+              permissions,
+            };
+            // A token still present means the page cap cut enumeration short —
+            // Drive has more permissions we didn't fetch.
+            if (pageToken) {
+              output.incomplete = true;
+            }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      list_recent_files: {
+        description: 'List the most recently modified files in Google Drive, newest first. Use this when the user asks for their recent/latest files without a specific search term. Excludes trashed items and folders; spans My Drive and every accessible shared drive. Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages. For a targeted search use search_files instead.',
+        readOnlyHint: true,
+        outputSchema: {
+          files: z.array(driveFileSchema),
+          nextPageToken: z.string().nullable(),
+          incompleteSearch: z.boolean().optional(),
+        },
+        schema: {
+          page_size: z
+            .number()
+            .int()
+            .min(1)
+            .max(100)
+            .optional()
+            .describe('Number of results per page (1-100, default 20).'),
+          page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ page_size, page_token }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const effectivePageSize = Math.min(Math.max(Number(page_size) || 20, 1), 100);
+
+            const params = new URLSearchParams({
+              pageSize: String(effectivePageSize),
+              orderBy: 'modifiedTime desc',
+              q: "trashed = false and mimeType != 'application/vnd.google-apps.folder'",
+              fields: DRIVE_FILE_LIST_FIELDS,
+              corpora: 'allDrives',
+              supportsAllDrives: 'true',
+              includeItemsFromAllDrives: 'true',
+              ...(page_token && { pageToken: page_token }),
+            });
+
+            const result = await makeDriveRequest(`/files?${params}`, accessToken);
+
+            const files = result.files || [];
+            const formattedFiles = files.map(formatDriveFile);
+
+            const output: any = {
+              files: formattedFiles,
+              nextPageToken: result.nextPageToken || null,
+            };
+            if (result.incompleteSearch === true) {
+              output.incompleteSearch = true;
+            }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      trash_file: {
+        description: 'Move a Google Drive file or folder to the trash. This is reversible — the item stays in Drive\'s trash and can be restored from the Drive UI; it is NOT a permanent delete. Use this when the user asks to delete, remove, or trash a file. Trashing a folder trashes everything inside it.',
+        destructiveHint: true,
+        outputSchema: {
+          id: z.string(),
+          name: z.string().optional(),
+          trashed: z.boolean(),
+          webViewLink: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder to move to the trash.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,name,trashed,webViewLink&supportsAllDrives=true`,
+              accessToken,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trashed: true }),
+              },
+            );
+
+            const output = {
+              id: result.id,
+              name: result.name,
+              trashed: result.trashed === true,
+              webViewLink: result.webViewLink,
+              message: `'${result.name ?? file_id}' moved to trash. It can be restored from Google Drive's trash.`,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      update_file: {
+        description: 'Update the metadata of a Google Drive file or folder: rename it (new_name), set its description, or star/unstar it. Provide at least one field to change; omitted fields are left untouched. Use this for metadata edits only — to move an item use move_file, to change sharing use share_file, and to trash it use trash_file.',
+        outputSchema: {
+          id: z.string(),
+          name: z.string().optional(),
+          description: z.string().optional(),
+          starred: z.boolean().optional(),
+          modifiedTime: z.string().optional(),
+          webViewLink: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder to update.'),
+          new_name: z.string().optional().describe('New name for the file or folder.'),
+          description: z.string().optional().describe('New description. Pass an empty string to clear an existing description.'),
+          starred: z.boolean().optional().describe('true to star the item, false to unstar it.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, new_name, description, starred }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const update = buildFileUpdate({ new_name, description, starred });
+            if (!update.ok) {
+              return formatDriveError(new Error(update.error));
+            }
+
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,name,description,starred,modifiedTime,webViewLink&supportsAllDrives=true`,
+              accessToken,
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(update.body),
+              },
+            );
+
+            const output = {
+              id: result.id,
+              name: result.name,
+              description: result.description,
+              starred: result.starred === true,
+              modifiedTime: result.modifiedTime,
+              webViewLink: result.webViewLink,
+              message: 'File updated successfully',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],

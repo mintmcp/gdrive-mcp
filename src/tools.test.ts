@@ -15,6 +15,8 @@ import {
   buildMultipartBody,
   parseMimeType,
   requiresBase64,
+  buildFileUpdate,
+  formatDriveFile,
 } from './tools.js';
 
 describe('escapeDriveQValue', () => {
@@ -242,6 +244,77 @@ describe('formatDriveError', () => {
   });
   it('omits structuredContent, which a client would validate against outputSchema', () => {
     expect('structuredContent' in formatDriveError(new Error('boom'))).toBe(false);
+  });
+});
+
+describe('buildFileUpdate', () => {
+  it('maps new_name to the Drive "name" field', () => {
+    const r = buildFileUpdate({ new_name: 'report.pdf' });
+    expect(r).toEqual({ ok: true, body: { name: 'report.pdf' } });
+  });
+  it('includes description and starred, and combines multiple fields', () => {
+    const r = buildFileUpdate({ new_name: 'x', description: 'notes', starred: true });
+    expect(r).toEqual({ ok: true, body: { name: 'x', description: 'notes', starred: true } });
+  });
+  it('allows clearing a description with an empty string', () => {
+    expect(buildFileUpdate({ description: '' })).toEqual({ ok: true, body: { description: '' } });
+  });
+  it('allows unstarring with starred=false', () => {
+    expect(buildFileUpdate({ starred: false })).toEqual({ ok: true, body: { starred: false } });
+  });
+  it('rejects an update with no fields', () => {
+    const r = buildFileUpdate({});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/at least one field/i);
+  });
+  it('rejects an empty or whitespace-only new_name', () => {
+    expect(buildFileUpdate({ new_name: '' }).ok).toBe(false);
+    expect(buildFileUpdate({ new_name: '   ' }).ok).toBe(false);
+  });
+  it('rejects wrong types for description and starred', () => {
+    expect(buildFileUpdate({ description: 123 as any }).ok).toBe(false);
+    expect(buildFileUpdate({ starred: 'yes' as any }).ok).toBe(false);
+  });
+});
+
+describe('formatDriveFile', () => {
+  it('parses a numeric string size to a number', () => {
+    expect(formatDriveFile({ id: 'x', size: '1024' }).size).toBe(1024);
+  });
+  it('leaves size undefined when the field is absent', () => {
+    expect(formatDriveFile({ id: 'x' }).size).toBeUndefined();
+  });
+  it('marks isFolder true only for the folder mimeType', () => {
+    expect(formatDriveFile({ mimeType: 'application/vnd.google-apps.folder' }).isFolder).toBe(true);
+    expect(formatDriveFile({ mimeType: 'application/pdf' }).isFolder).toBe(false);
+    expect(formatDriveFile({}).isFolder).toBe(false);
+  });
+  it('takes owner from owners[0].emailAddress', () => {
+    expect(formatDriveFile({ owners: [{ emailAddress: 'a@b.com' }] }).owner).toBe('a@b.com');
+  });
+  it('leaves owner undefined when there are no owners', () => {
+    expect(formatDriveFile({ owners: [] }).owner).toBeUndefined();
+    expect(formatDriveFile({}).owner).toBeUndefined();
+  });
+  it('coerces trashed to a strict boolean', () => {
+    expect(formatDriveFile({ trashed: true }).trashed).toBe(true);
+    expect(formatDriveFile({}).trashed).toBe(false);
+    expect(formatDriveFile({ trashed: 'true' as any }).trashed).toBe(false);
+  });
+  it('tolerates a sparse object with only id', () => {
+    expect(formatDriveFile({ id: 'only-id' })).toEqual({
+      id: 'only-id',
+      name: undefined,
+      mimeType: undefined,
+      size: undefined,
+      createdTime: undefined,
+      modifiedTime: undefined,
+      parents: undefined,
+      webViewLink: undefined,
+      owner: undefined,
+      isFolder: false,
+      trashed: false,
+    });
   });
 });
 
