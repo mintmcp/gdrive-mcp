@@ -67,6 +67,7 @@ const ALL_TOOLS = [
   "move_file",
   "search_files",
   "share_file",
+  "upload_file",
 ].sort();
 
 describe("createServer tool surface", () => {

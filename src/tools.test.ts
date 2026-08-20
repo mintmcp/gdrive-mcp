@@ -10,6 +10,11 @@ import {
   formatDriveError,
   DriveApiError,
   unsupportedMessage,
+  inferMimeTypeFromName,
+  decodeUploadContent,
+  buildMultipartBody,
+  parseMimeType,
+  requiresBase64,
 } from './tools.js';
 
 describe('escapeDriveQValue', () => {
@@ -213,25 +218,30 @@ describe('isRetryable', () => {
 });
 
 describe('formatDriveError', () => {
-  it('emits structured 401 with reconnect hint', () => {
+  const payloadOf = (e: any) => JSON.parse(e.content[0].text);
+
+  it('emits 401 with reconnect hint', () => {
     const e = formatDriveError(new DriveApiError('unauthorized', 401));
     expect(e.isError).toBe(true);
-    expect(e.structuredContent.status).toBe(401);
-    expect(e.structuredContent.hint).toMatch(/reconnect/i);
+    expect(payloadOf(e).status).toBe(401);
+    expect(payloadOf(e).hint).toMatch(/reconnect/i);
   });
-  it('emits structured 404 with not-found hint', () => {
+  it('emits 404 with not-found hint', () => {
     const e = formatDriveError(new DriveApiError('not found', 404));
-    expect(e.structuredContent.status).toBe(404);
-    expect(e.structuredContent.hint).toMatch(/not found/i);
+    expect(payloadOf(e).status).toBe(404);
+    expect(payloadOf(e).hint).toMatch(/not found/i);
   });
-  it('emits structured 429 with retry hint', () => {
+  it('emits 429 with retry hint', () => {
     const e = formatDriveError(new DriveApiError('too many', 429));
-    expect(e.structuredContent.hint).toMatch(/Retried/i);
+    expect(payloadOf(e).hint).toMatch(/Retried/i);
   });
   it('preserves message for plain Error without status', () => {
     const e = formatDriveError(new Error('boom'));
-    expect(e.structuredContent.error).toBe('boom');
-    expect(e.structuredContent.status).toBeUndefined();
+    expect(payloadOf(e).error).toBe('boom');
+    expect(payloadOf(e).status).toBeUndefined();
+  });
+  it('omits structuredContent, which a client would validate against outputSchema', () => {
+    expect('structuredContent' in formatDriveError(new Error('boom'))).toBe(false);
   });
 });
 
@@ -240,3 +250,199 @@ describe('Buffer base64 round-trip (platform sanity)', () => {
     expect(Buffer.from(new Uint8Array([72, 101, 108, 108, 111])).toString('base64')).toBe('SGVsbG8=');
   });
 });
+
+describe('inferMimeTypeFromName', () => {
+  it('maps known extensions, case-insensitively', () => {
+    expect(inferMimeTypeFromName('deck.pptx', 'base64')).toBe(
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    );
+    expect(inferMimeTypeFromName('notes.md', 'text')).toBe('text/markdown');
+    expect(inferMimeTypeFromName('logo.PNG', 'base64')).toBe('image/png');
+  });
+  it('falls back to the encoding default for unknown or missing extensions', () => {
+    expect(inferMimeTypeFromName('thing.qqq', 'text')).toBe('text/plain');
+    expect(inferMimeTypeFromName('thing.qqq', 'base64')).toBe('application/octet-stream');
+    expect(inferMimeTypeFromName('README', 'text')).toBe('text/plain');
+    expect(inferMimeTypeFromName('archive.', 'base64')).toBe('application/octet-stream');
+  });
+  it('infers the OpenDocument types it advertises for conversion', () => {
+    expect(inferMimeTypeFromName('report.odt', 'base64')).toBe('application/vnd.oasis.opendocument.text');
+    expect(inferMimeTypeFromName('sheet.ods', 'base64')).toBe('application/vnd.oasis.opendocument.spreadsheet');
+    expect(inferMimeTypeFromName('deck.odp', 'base64')).toBe('application/vnd.oasis.opendocument.presentation');
+  });
+  it('uses the last extension of a multi-dot name', () => {
+    expect(inferMimeTypeFromName('backup.tar.zip', 'base64')).toBe('application/zip');
+  });
+});
+
+
+const UPLOAD_LIMIT = 5 * 1024 * 1024;
+
+describe('decodeUploadContent', () => {
+  it('encodes text as UTF-8, multibyte included', () => {
+    const r = decodeUploadContent('héllo', 'text', UPLOAD_LIMIT);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bytes).toEqual(Buffer.from('héllo', 'utf8'));
+  });
+  it('treats missing or empty content as zero bytes', () => {
+    for (const [content, encoding] of [[undefined, 'text'], ['', 'text'], ['', 'base64']] as const) {
+      const r = decodeUploadContent(content, encoding, UPLOAD_LIMIT);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.bytes.length).toBe(0);
+    }
+  });
+  it('decodes valid base64', () => {
+    const r = decodeUploadContent('SGVsbG8=', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bytes.toString('utf8')).toBe('Hello');
+  });
+  it('ignores whitespace and line breaks inside base64', () => {
+    const r = decodeUploadContent(' SGVs\nbG8=\n', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bytes.toString('utf8')).toBe('Hello');
+  });
+  it('rejects characters outside the base64 alphabet instead of dropping them', () => {
+    const r = decodeUploadContent('SGVs*bG8=', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/not valid base64/);
+  });
+  it('rejects bad padding and truncated input', () => {
+    expect(decodeUploadContent('SGVsbG8', 'base64', UPLOAD_LIMIT).ok).toBe(false);
+    expect(decodeUploadContent('SGVsbG8==', 'base64', UPLOAD_LIMIT).ok).toBe(false);
+    expect(decodeUploadContent('=', 'base64', UPLOAD_LIMIT).ok).toBe(false);
+  });
+  it('does not validate base64 shape when encoding is text', () => {
+    const r = decodeUploadContent('SGVs*bG8=', 'text', UPLOAD_LIMIT);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bytes.toString('utf8')).toBe('SGVs*bG8=');
+  });
+});
+
+describe('buildMultipartBody', () => {
+  const boundary = 'test-boundary';
+
+  it('emits the metadata part then the content part, CRLF-delimited', () => {
+    const body = buildMultipartBody(
+      { name: 'a.txt', mimeType: 'text/plain' },
+      'text/plain',
+      Buffer.from('hi', 'utf8'),
+      boundary
+    );
+    expect(body.toString('utf8')).toBe(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `{"name":"a.txt","mimeType":"text/plain"}\r\n` +
+      `--${boundary}\r\nContent-Type: text/plain\r\n\r\nhi\r\n--${boundary}--`
+    );
+  });
+
+  it('carries the target mime in the metadata and the source mime on the content part', () => {
+    const body = buildMultipartBody(
+      { name: 'd.pptx', mimeType: 'application/vnd.google-apps.presentation', parents: ['folder1'] },
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      Buffer.alloc(0),
+      boundary
+    ).toString('utf8');
+    expect(body).toContain('"mimeType":"application/vnd.google-apps.presentation"');
+    expect(body).toContain('"parents":["folder1"]');
+    expect(body).toContain('Content-Type: application/vnd.openxmlformats-officedocument.presentationml.presentation');
+  });
+
+  it('keeps binary bytes intact', () => {
+    const bytes = Buffer.from([0x00, 0xff, 0x0d, 0x0a, 0x80, 0x1a]);
+    const body = buildMultipartBody({ name: 'b.bin' }, 'application/octet-stream', bytes, boundary);
+    const start = body.indexOf(Buffer.from('\r\n\r\n', 'utf8'), body.indexOf('application/octet-stream')) + 4;
+    expect(body.subarray(start, start + bytes.length)).toEqual(bytes);
+    expect(body.subarray(start + bytes.length).toString('utf8')).toBe(`\r\n--${boundary}--`);
+  });
+});
+
+describe('parseMimeType', () => {
+  it('accepts a bare type and one with parameters', () => {
+    const bare = parseMimeType(' application/pdf ');
+    expect(bare).toEqual({ ok: true, mimeType: 'application/pdf', essence: 'application/pdf' });
+    const parameterised = parseMimeType('Text/CSV; charset=utf-8');
+    expect(parameterised.ok).toBe(true);
+    if (parameterised.ok) {
+      expect(parameterised.mimeType).toBe('Text/CSV; charset=utf-8');
+      expect(parameterised.essence).toBe('text/csv');
+    }
+  });
+  it('trims surrounding whitespace, so a trailing newline is harmless', () => {
+    expect(parseMimeType('text/plain\r\n\r\n')).toEqual({ ok: true, mimeType: 'text/plain', essence: 'text/plain' });
+  });
+  it('rejects header injection and malformed values', () => {
+    for (const bad of [
+      'text/plain\r\nContent-Transfer-Encoding: base64',
+      'textplain',
+      'text/',
+      '',
+      'text/plain; charset',
+    ]) {
+      expect(parseMimeType(bad).ok).toBe(false);
+    }
+  });
+});
+
+
+
+describe('requiresBase64', () => {
+  it('flags binary media and Office containers', () => {
+    expect(requiresBase64('image/png')).toBe(true);
+    expect(requiresBase64('application/pdf')).toBe(true);
+    expect(requiresBase64('application/vnd.openxmlformats-officedocument.presentationml.presentation')).toBe(true);
+  });
+  it('leaves textual types alone, SVG included', () => {
+    expect(requiresBase64('text/csv')).toBe(false);
+    expect(requiresBase64('application/json')).toBe(false);
+    expect(requiresBase64('image/svg+xml')).toBe(false);
+  });
+});
+
+
+describe('decodeUploadContent truncation', () => {
+  it('reports a cut-off payload as truncated, not malformed', () => {
+    const r = decodeUploadContent('QUJDRA'.repeat(500) + 'QUJ', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('cut off');
+      expect(r.error).toContain('smaller file');
+    }
+  });
+  it('still calls genuinely malformed content malformed', () => {
+    const r = decodeUploadContent('SGVs*bG8=', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('not valid base64');
+  });
+});
+
+describe('decodeUploadContent on large payloads', () => {
+  const limit = 5 * 1024 * 1024;
+
+  it('validates a multi-megabyte base64 string without overflowing the stack', () => {
+    const payload = Buffer.alloc(4 * 1024 * 1024, 7).toString('base64');
+    const r = decodeUploadContent(payload, 'base64', limit);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bytes.length).toBe(4 * 1024 * 1024);
+  });
+
+  it('rejects whitespace-only base64 rather than creating an empty file', () => {
+    const r = decodeUploadContent('   \n  ', 'base64', UPLOAD_LIMIT);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('whitespace');
+  });
+  it('rejects an over-limit payload, text or base64, without decoding it', () => {
+    expect(decodeUploadContent('x'.repeat(11), 'text', 10).ok).toBe(false);
+    expect(decodeUploadContent(Buffer.alloc(11).toString('base64'), 'base64', 10).ok).toBe(false);
+  });
+
+  it('accepts a payload exactly at the limit', () => {
+    expect(decodeUploadContent('x'.repeat(10), 'text', 10).ok).toBe(true);
+  });
+
+  it('rejects non-string content rather than creating an empty file', () => {
+    const r = decodeUploadContent(42 as any, 'text', limit);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('must be a string');
+  });
+});
+
