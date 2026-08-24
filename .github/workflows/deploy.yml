@@ -1,68 +1,77 @@
 name: Deploy to Fly
 
+# Branch-driven, not tag-driven: a PR deploys staging, merging to main ships prod
 on:
   push:
-    branches: [main]              # merge to main auto-deploys staging
-    tags: ["v*"]                  # a release tag deploys prod
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
-# Serialize prod deploys against each other (and staging against itself) so two
-# tags pushed back to back can't race on the same Fly app.
 concurrency:
-  group: deploy-${{ github.ref_type == 'tag' && 'prod' || 'staging' }}
-  cancel-in-progress: false
+  # Prod deploys never cancel each other. A second push to the same PR
+  # supersedes the first, since only the latest commit is worth testing
+  group: deploy-${{ github.event_name == 'push' && 'prod' || github.head_ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  deploy:
+  targets:
     runs-on: ubuntu-latest
+    # A fork PR has no OIDC credentials, so deploying it would fail with a
+    # confusing auth error. Customers run this repo too, so skip cleanly
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
-      # The prod app name pins the MAJOR only. Minor and patch tags redeploy the
-      # same app, so already-connected customers keep their URL. A new major gets
-      # a brand new app at a brand new URL — which is the whole point: we only
-      # bump major when the required Google OAuth scopes change, and a scope
-      # change means a new MintMCP connector that customers must reconnect to.
-      #
-      #   v1.0.0, v1.1.0, v1.4.2  ->  gdrive-v1-mintmcp.fly.dev
-      #   v2.0.0, v2.0.1          ->  gdrive-v2-mintmcp.fly.dev
-      - id: target
+      - id: pick
+        env:
+          WANT: ${{ github.event_name == 'push' && 'prod' || 'staging' }}
         run: |
-          if [ "$GITHUB_REF_TYPE" != tag ]; then
-            echo "env=staging" >> "$GITHUB_OUTPUT"
-            echo "app=gdrive-mintmcp-staging" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          MATRIX=$(yq -o=json -I0 '.' deployments.yml | jq -c --arg want "$WANT" \
+            '{include: [.[] | select(.live and .env == $want)]}')
 
-          if ! printf '%s' "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "error: tag '$GITHUB_REF_NAME' is not a release version" >&2
-            echo "       expected semver, e.g. v1.0.0" >&2
+          if [ "$(jq '.include | length' <<<"$MATRIX")" -eq 0 ]; then
+            echo "error: no live '$WANT' entry in deployments.yml" >&2
             exit 2
           fi
 
-          PKG_VERSION=$(jq -r .version package.json)
-          if [ "$GITHUB_REF_NAME" != "v${PKG_VERSION}" ]; then
-            echo "error: tag '$GITHUB_REF_NAME' does not match package.json version '$PKG_VERSION'" >&2
-            echo "       bump package.json to ${GITHUB_REF_NAME#v} and retag" >&2
-            exit 2
-          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-          MAJOR=${GITHUB_REF_NAME%%.*}
+  deploy:
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
 
-          echo "env=prod" >> "$GITHUB_OUTPUT"
-          echo "app=gdrive-${MAJOR}-mintmcp" >> "$GITHUB_OUTPUT"
+      # PROFILE selects the scope set from src/scopes.ts; an unknown name
+      # crashes at boot and fails the deploy
+      - run: |
+          {
+            echo ""
+            echo "[env]"
+            echo "  PROFILE = \"$(jq -r '.profile' <<<'${{ toJson(matrix) }}')\""
+          } >> fly.toml
 
       - run: |
-          echo "Deploying **${{ steps.target.outputs.env }}** to \`${{ steps.target.outputs.app }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "https://${{ steps.target.outputs.app }}.fly.dev/mcp" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Deploying **${{ matrix.env }}** to \`${{ matrix.app }}\`"
+            echo ""
+            echo "https://${{ matrix.app }}.fly.dev/mcp"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: mintmcp/mint-fly-deploy@main
         with:
-          env: ${{ steps.target.outputs.env }}
-          fly-app: ${{ steps.target.outputs.app }}
+          env: ${{ matrix.env }}
+          fly-app: ${{ matrix.app }}
           aws-role-arn: arn:aws:iam::519578939119:role/github-actions-fly-deploy
