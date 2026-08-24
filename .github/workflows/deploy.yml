@@ -21,8 +21,7 @@ concurrency:
 jobs:
   targets:
     runs-on: ubuntu-latest
-    # A fork PR has no OIDC credentials, so deploying it would fail with a
-    # confusing auth error. Customers run this repo too, so skip cleanly
+    # Fork PRs run without OIDC credentials, so skip instead of failing on auth
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
