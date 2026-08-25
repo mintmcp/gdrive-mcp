@@ -5,9 +5,10 @@ export const SCOPES = {
   DRIVE_LABELS_READONLY: "https://www.googleapis.com/auth/drive.labels.readonly",
 } as const;
 
-// Append-only: changing an entry forces every user of that connector to
-// re-consent. Each profile must match the scopes its brokered mcp-registry
-// entry requests
+// Editing a profile forces every user of its connector to re-consent, so
+// frozen profiles never change. `full` is the evolving exception: its users
+// accept re-consent as it grows. Keep each profile matching the scopes its
+// brokered mcp-registry entry requests
 export const PROFILES: Record<string, readonly string[]> = {
   standard: [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
   full: [SCOPES.DRIVE],

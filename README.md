@@ -68,13 +68,19 @@ superset. An unknown profile name crashes at boot rather than silently
 serving every tool; the boot log prints the granted scope set and the
 resulting tool list.
 
-**Profiles are append-only.** Changing an existing profile's scopes would
-force every user of its connectors to re-consent in Google — the thing this
-whole design exists to avoid. A new scope need means a new profile, a new
-app in `deployments.yml`, and a new registry entry; existing connectors
-keep working untouched, forever. Keep a profile's scopes matching what the
-MintMCP brokered registry entry actually requests — nothing validates the
-two against each other yet.
+**Frozen profiles never change.** Editing a profile's scopes forces every
+user of its connectors to re-consent in Google — the thing this design
+exists to avoid. A new scope lands in `full` first, and gets a frozen
+profile of its own (a new entry in `deployments.yml` plus a new registry
+entry) only when someone wants it in isolation. Existing connectors keep
+working untouched, forever.
+
+**`full` is the evolving profile.** It always covers everything the
+connector can do, and it grows: choosing it is consent to future scope
+requests. When `full` gains a scope, existing users see the new tools fail
+with a "reconnect your Google account" hint until they reconnect. Update
+the brokered registry entry's scopes in the same change — nothing validates
+the two against each other yet.
 
 **Unset means every tool registers.** That is the default for anyone running
 their own copy who hasn't thought about scopes yet. Shipping a tool that
