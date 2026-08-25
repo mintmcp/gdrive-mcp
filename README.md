@@ -10,9 +10,10 @@ The container is stateless, listens on port 8000, and ships as a multi-stage
 ## Auth contract
 
 The server takes the user's Google access token **per request** from the
-HTTP `Authorization` header. There are no per-deployment env vars; the
+HTTP `Authorization` header. Credentials never live in the container; the
 MintMCP frontend owns OAuth (client ID/secret, refresh, scope grants) and
-forwards a short-lived access token to the container for each MCP call.
+forwards a short-lived access token for each MCP call. The only deployment
+configuration is the `PROFILE` env var (see [Profiles](#profiles)).
 
 Required Google OAuth scopes (configured on the MintMCP connector):
 
@@ -41,87 +42,62 @@ results (metadata, IDs, search hits, text file bodies) return
 payload). Errors route through a single envelope with HTTP status,
 reason, and a corrective hint.
 
+## Profiles
+
+A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
+a connector's contract with its users:
+
+| Profile    | Scopes                          |
+|------------|---------------------------------|
+| `standard` | `drive.readonly` + `drive.file` |
+| `full`     | `drive`                         |
+
+Each tool declares the Google scope it needs (the first argument to
+`requirePermissionSecure` in `src/tools.ts`):
+
+| Scope            | Tools                                                |
+|------------------|------------------------------------------------------|
+| `drive.readonly` | `search_files`, `get_file`                           |
+| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file` |
+
+Each deployment selects a profile via the `PROFILE` env var. At startup the
+server registers only the tools that profile's scopes cover, so a tool is
+never advertised that can only ever return 403. Full `drive` counts as
+covering `drive.file` and `drive.readonly`, because Google's grant is a
+superset. An unknown profile name crashes at boot rather than silently
+serving every tool; the boot log prints the granted scope set and the
+resulting tool list.
+
+**Frozen profiles never change.** Editing a profile's scopes forces every
+user of its connectors to re-consent in Google — the thing this design
+exists to avoid. A new scope lands in `full` first, and gets a frozen
+profile of its own (a new entry in `deployments.yml` plus a new registry
+entry) only when someone wants it in isolation. Existing connectors keep
+working untouched, forever.
+
+**`full` is the evolving profile.** It always covers everything the
+connector can do, and it grows: choosing it is consent to future scope
+requests. When `full` gains a scope, existing users see the new tools fail
+with a "reconnect your Google account" hint until they reconnect. Update
+the brokered registry entry's scopes in the same change — nothing validates
+the two against each other yet.
+
+**Unset means every tool registers.** That is the default for anyone running
+their own copy who hasn't thought about scopes yet. Shipping a tool that
+needs a scope no profile grants is therefore safe: it stays invisible
+everywhere until a profile lists that scope.
+
 ## Local development
 
 ```bash
 npm install
 npm run dev               # tsx watch
-npm run build && npm start
 npm test                  # vitest unit tests
+PROFILE=standard npm start   # run with a profile's tool surface
 npm run smoke             # docker build + boot + tools/list smoke
 ```
 
-## Docker
-
-```bash
-# build amd64 (mandatory for MintMCP runtime)
-docker buildx build \
-  --platform linux/amd64 \
-  -t mintmcp/gdrive-mcp:latest \
-  -t mintmcp/gdrive-mcp:0.1.0 \
-  --push .
-
-# run locally (Docker Desktop emulates amd64 on Apple Silicon)
-docker run --rm -p 8000:8000 mintmcp/gdrive-mcp:latest
-```
-
-## Deploy to MintMCP
-
-```bash
-hosted-cli build-and-push \
-  --image mintmcp/gdrive-mcp \
-  --tag 1.0.0
-```
-
-## Releases and deploys
-
-`.github/workflows/deploy.yml` picks the Fly app from the ref:
-
-| Trigger                    | Env     | Fly app                  |
-|----------------------------|---------|--------------------------|
-| push to `main`             | staging | `gdrive-mintmcp-staging` |
-| tag `v1.x.y`               | prod    | `gdrive-v1-mintmcp`      |
-| tag `v2.x.y`               | prod    | `gdrive-v2-mintmcp`      |
-
-**The prod app name pins the major only.** Minor and patch releases redeploy
-the same app, so customers already connected to `gdrive-v1-mintmcp.fly.dev`
-keep their URL and their connector. A new major is the only thing that moves
-prod to a new URL.
-
-### When to bump major
-
-Bump the major when either of these changes in a way existing clients can't
-absorb:
-
-- **The required Google OAuth scopes** (the list under
-  [Auth contract](#auth-contract)). A scope change means a new MintMCP
-  connector and a re-consent, so existing customers can't be carried forward
-  — they need a new endpoint, and the old one has to keep serving them until
-  they migrate.
-- **A tool's input or output contract**, when the change is not backwards
-  compatible — removing a parameter, renaming a field, tightening what's
-  accepted. Callers written against the old shape break.
-
-Everything else (new tools inside the existing scopes, additive optional
-parameters, bug fixes, perf) is a minor or patch.
-
-### Cutting a release
-
-```bash
-npm version 1.0.0 --no-git-tag-version   # updates package.json + lock
-git commit -am "release: v1.0.0"
-# merge to main, then:
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-The workflow refuses a tag that isn't `vX.Y.Z` or that doesn't match
-`package.json`'s `version`, so the tag and the shipped image can't drift.
-
-> `gdrive-mintmcp` (unversioned) is the pre-1.0 prod app. It predates the
-> `drive.file` scope and no longer receives deploys — leave it running for
-> customers on the old connector until they've moved to `gdrive-v1-mintmcp`.
-
-## Sanity-check the running container
+To poke at a locally running server:
 
 ```bash
 curl -s http://localhost:8000/healthz
@@ -132,9 +108,44 @@ curl -s -X POST http://localhost:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer fake-token" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
-# returns 6 tools: search_files, get_file, move_file, share_file,
-# create_folder, copy_file
+# lists the tools the active profile registers (all 6 when PROFILE is unset)
 ```
 
 A fake token returns a structured 401 from the Drive API (with a "reconnect
 your Google account" hint) — the server does not crash.
+
+## Releases and deploys
+
+`.github/workflows/deploy.yml` is branch-driven. There are no release tags.
+
+| Trigger              | Env     | Fly app                  |
+|----------------------|---------|--------------------------|
+| open / update a PR   | staging | `gdrive-mintmcp-staging` |
+| merge to `main`      | prod    | `gdrive-mintmcp`         |
+
+An open PR keeps staging pointed at that branch, so you can test the change
+end to end before merging. Two open PRs share one staging app: the last push
+wins.
+
+`deployments.yml` is the list of live apps. The workflow builds its matrix
+from it, so every live entry for the triggered environment deploys from the
+same commit — nothing can quietly fall out of the deploy path. Each entry
+names its `profile`, injected as `PROFILE` at deploy time.
+
+Adding a deployment that needs a different scope set (a connector with
+`drive.labels.readonly`, say) is one new profile and one new entry, not a
+branch and not a release: existing apps redeploy unchanged and withhold the
+new tools, and the new app registers them.
+
+## Hosting a copy on MintMCP
+
+To host the current branch as a MintMCP hosted connector — a test connector,
+or your own self-deployed copy:
+
+```bash
+npx @mintmcp/hosted-cli build-and-push --dockerfile Dockerfile --context .
+```
+
+Then set `PROFILE` in the connector's env settings to the profile whose
+scopes the connector's OAuth grant requests, or leave it unset to register
+every tool.

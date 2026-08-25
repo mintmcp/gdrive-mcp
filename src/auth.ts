@@ -42,21 +42,26 @@ export const requireAccessToken: RequestHandler = (req, res, next) => {
   requestContext.run({ accessToken }, next);
 };
 
+export interface ScopedHandler<TArgs> {
+  (args: TArgs): Promise<any>;
+  scope: string;
+}
+
 /**
  * Wraps a tool handler so it can read the Google access token from
  * AsyncLocalStorage. MintMCP forwards the user's OAuth token as
  * `Authorization: Bearer <token>` on every request; requireAccessToken parses it
  * and runs the request inside requestContext.run().
  *
- * The `scope` parameter is informational only — MintMCP enforces scope
- * gating at the connector configuration level, so the server doesn't
- * need to re-check.
+ * `scope` is the Google scope the tool needs. It rides on the returned handler
+ * so createServer can skip tools this deployment wasn't granted, instead of
+ * advertising a tool that can only ever 403
  */
 export function withGoogleAuth<TArgs>(
-  _scope: string,
+  scope: string,
   handler: (args: TArgs, context: { accessToken: string }) => Promise<any>,
-) {
-  return async (args: TArgs) => {
+): ScopedHandler<TArgs> {
+  const wrapped = async (args: TArgs) => {
     const accessToken = getAccessToken();
     if (!accessToken) {
       return {
@@ -71,4 +76,6 @@ export function withGoogleAuth<TArgs>(
     }
     return handler(args, { accessToken });
   };
+
+  return Object.assign(wrapped, { scope });
 }

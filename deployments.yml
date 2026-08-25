@@ -1,0 +1,11 @@
+# profile names a frozen scope set from PROFILES in src/scopes.ts
+
+- app: gdrive-mintmcp-staging
+  env: staging
+  live: true
+  profile: standard # drive.readonly + drive.file
+
+- app: gdrive-mintmcp
+  env: prod
+  live: true
+  profile: standard # drive.readonly + drive.file
