@@ -11,7 +11,9 @@ export const SCOPES = {
 // brokered mcp-registry entry requests
 export const PROFILES: Record<string, readonly string[]> = {
   standard: [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
-  full: [SCOPES.DRIVE],
+  "standard-labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
+  // labels.readonly is explicit here because full drive does not imply it
+  full: [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
 };
 
 // Google's scope hierarchy, not our policy: full drive is a superset of the

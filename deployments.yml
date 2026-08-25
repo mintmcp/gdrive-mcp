@@ -9,3 +9,9 @@
   env: prod
   live: true
   profile: standard # drive.readonly + drive.file
+
+# labels-enabled connector: flip live to true once the Fly app exists
+- app: gdrive-mintmcp-labels
+  env: prod
+  live: false
+  profile: standard-labels # standard + drive.labels.readonly

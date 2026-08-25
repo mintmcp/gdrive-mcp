@@ -22,7 +22,17 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/userinfo.profile`
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
-- `https://www.googleapis.com/auth/drive.labels.readonly` — for `get_file`'s Drive-label enrichment (resolves selection-choice ids to display names on `_meta.labels`). If absent, label reads fail soft: results carry `labelsError` instead of resolved labels.
+- `https://www.googleapis.com/auth/drive.labels.readonly` — optional, carried
+  only by the `standard-labels` and `full` profiles. Enables `get_file`'s
+  Drive-label enrichment: applied labels are surfaced on the tool result's
+  `_meta.labels` as `{labelId, fieldId, valueType, value, resolved}` entries so
+  policy middleware can act on them. Selection choices are admin-defined
+  taxonomy; `text` values are free form and writable by anyone with edit rights
+  on the file, so a gate must not trust them alike. `_meta.labelsError` flags a
+  failed read/resolution and `_meta.labelsSkipped` flags label fields the
+  connector does not render; either means "classification unknown", not
+  "unlabeled". When the deployment's grant lacks this scope, `get_file` skips
+  the label API calls entirely and returns no `_meta`.
 
 ## Tools
 
@@ -54,18 +64,20 @@ reason, and a corrective hint.
 A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
 a connector's contract with its users:
 
-| Profile    | Scopes                          |
-|------------|---------------------------------|
-| `standard` | `drive.readonly` + `drive.file` |
-| `full`     | `drive`                         |
+| Profile           | Scopes                                                    |
+|-------------------|-----------------------------------------------------------|
+| `standard`        | `drive.readonly` + `drive.file`                           |
+| `standard-labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `full`            | `drive` + `drive.labels.readonly`                         |
 
 Each tool declares the Google scope it needs (the first argument to
 `requirePermissionSecure` in `src/tools.ts`):
 
-| Scope            | Tools                                                |
-|------------------|------------------------------------------------------|
-| `drive.readonly` | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
-| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
+| Scope                   | Tools                                                   |
+|-------------------------|---------------------------------------------------------|
+| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
+| `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
+| `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is

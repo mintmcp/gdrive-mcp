@@ -6,13 +6,14 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
+import { grantedScopes, SCOPES } from './scopes.js';
 
 const GOOGLE_DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
 const DRIVE_LABELS_API = 'https://drivelabels.googleapis.com/v2';
-const LABEL_SCHEMA_TTL_MS = 60 * 60 * 1000; // label schemas change rarely — cache for an hour
-const LABEL_SCHEMA_CACHE_MAX = 500; // bound growth: distinct label@revision keys accrue over the process lifetime
+const MAX_LABEL_PAGES = 10; // 1000 labels at maxResults=100, far above Drive's per-file limit
+const MAX_TEXT_LABEL_CHARS = 256; // text fields are free form, cap what reaches the consumer
 
 // MIME categorisation for get_file. We derive these from the *actual* metadata
 // mimeType, not from caller-supplied input, so the tool can't be lied into
@@ -561,20 +562,36 @@ async function makeDriveRequest(
   throw lastError ?? new DriveApiError('Google Drive request failed', 0);
 }
 
-// Resolved label schema: fieldId -> (choiceId -> human-readable display name)
+// fieldId -> choiceId -> display name
 export type LabelSchema = Record<string, Record<string, string>>;
 
-// Per-process cache: resolve each label's schema once, not on every get_file.
-const labelSchemaCache = new Map<string, { schema: LabelSchema; expiresAt: number }>();
+// One label value, tagged by provenance: selection choices are admin-defined
+// taxonomy, text values are free form and writable by anyone with edit rights
+// on the file, and resolved=false means value is a raw choice id we could not
+// name. A policy gate must not treat the three alike
+export type LabelValue = {
+  labelId: string;
+  fieldId: string;
+  valueType: 'selection' | 'text';
+  value: string;
+  resolved: boolean;
+};
 
-/** Test hook — the cache is module state, so tests need a way to isolate runs. */
-export function clearLabelSchemaCache(): void {
-  labelSchemaCache.clear();
-}
+export type FileLabels = {
+  labels: LabelValue[];
+  // stable codes, never raw provider messages (those stay in logs)
+  error?: 'label read failed' | 'incomplete label resolution';
+  // set when label fields exist that this connector does not render
+  // (date/integer/user, empty text), so labels: [] alone is not proof the
+  // file is unclassified
+  skipped?: boolean;
+};
 
 /**
- * Fetch (and cache by) the exact label revision the file references, so a later
- * choice rename can't retroactively change how an already-labeled file resolves.
+ * Fetch the exact label revision the file references, so a later choice rename
+ * can't retroactively change how an already-labeled file resolves. Never cached
+ * across requests: each request carries a different user's token, and a schema
+ * fetched with one user's authorization must not answer another user's request
  */
 export async function getLabelSchema(
   labelId: string,
@@ -584,10 +601,6 @@ export async function getLabelSchema(
   const labelResource = revisionId
     ? `${encodeURIComponent(labelId)}@${encodeURIComponent(revisionId)}`
     : encodeURIComponent(labelId);
-  const cached = labelSchemaCache.get(labelResource);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.schema;
-  }
 
   const data = await makeDriveRequest(
     `${DRIVE_LABELS_API}/labels/${labelResource}?view=LABEL_VIEW_FULL`,
@@ -612,94 +625,138 @@ export async function getLabelSchema(
     schema[field.id] = choiceNames;
   }
 
-  if (labelSchemaCache.size >= LABEL_SCHEMA_CACHE_MAX) {
-    // Evict the oldest entry (Map preserves insertion order) so the cache stays bounded.
-    const oldest = labelSchemaCache.keys().next().value;
-    if (oldest !== undefined) labelSchemaCache.delete(oldest);
-  }
-  labelSchemaCache.set(labelResource, { schema, expiresAt: Date.now() + LABEL_SCHEMA_TTL_MS });
   return schema;
 }
 
 /**
- * Surface the file's Drive label values as human-readable strings: resolved
- * selection-choice names + text-field values (date/integer/user fields are
- * skipped as non-classificatory). `error` set means a genuine read/resolve
- * failure, not a label shape we chose to skip. Policy middleware keys on
- * `_meta.labels` / `_meta.labelsError` — the connector informs, never blocks.
+ * Surface the file's Drive label values for policy middleware, which reads them
+ * from the tool result's _meta. The connector informs, never blocks: failures
+ * come back as a stable error code alongside whatever was read, and the file
+ * contents still return. A consumer gating access must treat error or skipped
+ * as "classification unknown", never as unlabeled
  */
 export async function getFileLabels(
   fileId: string,
   accessToken: string
-): Promise<{ labels: string[]; error?: string }> {
+): Promise<FileLabels> {
   type AppliedLabel = {
-    id: string;
+    id?: string;
     revisionId?: string;
     fields?: Record<string, { valueType?: string; selection?: string[]; text?: string[] }>;
   };
 
   const applied: AppliedLabel[] = [];
-  const labels: string[] = [];
-  // `error` is a stable code (never a raw provider message — that stays in logs) so the
-  // _meta contract is stable and no upstream detail leaks into model-visible responses.
-  let error: string | undefined;
+  const labels: LabelValue[] = [];
+  let error: FileLabels['error'];
+  let skipped = false;
 
-  // Page through all applied labels. A mid-pagination failure keeps the labels already read
-  // (partial) and flags the error, rather than discarding everything.
+  // A mid-pagination failure keeps the labels already read and flags the
+  // error rather than discarding everything
   try {
     let pageToken: string | undefined;
-    do {
+    for (let page = 0; page < MAX_LABEL_PAGES; page++) {
       const params = new URLSearchParams({ maxResults: '100' });
       if (pageToken) params.set('pageToken', pageToken);
-      const page = await makeDriveRequest(
+      const pageData = await makeDriveRequest(
         `/files/${encodeURIComponent(fileId)}/listLabels?${params}`,
         accessToken
       ) as { labels?: AppliedLabel[]; nextPageToken?: string };
-      if (page?.labels) applied.push(...page.labels);
-      pageToken = page?.nextPageToken;
-    } while (pageToken);
+      if (pageData?.labels) applied.push(...pageData.labels);
+      pageToken = pageData?.nextPageToken;
+      if (!pageToken) break;
+    }
+    if (pageToken) {
+      error = 'label read failed';
+      console.warn(`getFileLabels: page cap hit fileId=${fileId}`);
+    }
   } catch (err: any) {
     error = 'label read failed';
     console.warn(`getFileLabels: label read failed fileId=${fileId} error=${err?.message}`);
   }
 
-  for (const label of applied) {
-    const fields = Object.entries(label.fields || {});
+  const toResolve: Array<{
+    labelId: string;
+    revisionId?: string;
+    selections: Array<{ fieldId: string; choiceIds: string[] }>;
+  }> = [];
 
-    // Text fields are already human-readable — surface their values directly.
-    for (const [, field] of fields) {
+  for (const label of applied) {
+    if (!label.id) {
+      skipped = true;
+      continue;
+    }
+    const selections: Array<{ fieldId: string; choiceIds: string[] }> = [];
+    for (const [fieldId, field] of Object.entries(label.fields || {})) {
       if (field.valueType === 'text' && field.text) {
-        labels.push(...field.text.filter(Boolean));
+        const values = field.text.filter(Boolean);
+        for (const value of values) {
+          labels.push({
+            labelId: label.id,
+            fieldId,
+            valueType: 'text',
+            value: value.slice(0, MAX_TEXT_LABEL_CHARS),
+            resolved: true,
+          });
+        }
+        if (values.length < field.text.length) skipped = true;
+      } else if (field.valueType === 'selection' && field.selection?.length) {
+        selections.push({ fieldId, choiceIds: field.selection });
+      } else {
+        skipped = true;
       }
     }
-
-    // Selection fields carry opaque choice IDs; resolve them via the label schema.
-    const selectionFields = fields.filter(([, f]) => f.valueType === 'selection' && f.selection?.length);
-    if (selectionFields.length === 0) continue;
-    try {
-      const schema = await getLabelSchema(label.id, label.revisionId, accessToken);
-      for (const [fieldId, field] of selectionFields) {
-        for (const choiceId of field.selection!) {
-          const name = schema[fieldId]?.[choiceId];
-          if (name) {
-            labels.push(name);
-          } else {
-            // Can't name this choice: surface the raw id so nothing's lost, and flag the miss.
-            labels.push(choiceId);
-            if (!error) error = 'incomplete label resolution';
-            console.warn(`getFileLabels: unresolved choice fileId=${fileId} labelId=${label.id}`);
-          }
-        }
-      }
-    } catch (e: any) {
-      // One label's schema failure shouldn't discard values already collected from others.
-      if (!error) error = 'incomplete label resolution';
-      console.warn(`getFileLabels: label resolve failed fileId=${fileId} labelId=${label.id} error=${e?.message}`);
+    if (selections.length > 0) {
+      toResolve.push({ labelId: label.id, revisionId: label.revisionId, selections });
     }
   }
 
-  const deduped = [...new Set(labels)];
-  return error ? { labels: deduped, error } : { labels: deduped };
+  // A failure on one label never discards values collected from the others
+  const schemas = await Promise.allSettled(
+    toResolve.map((l) => getLabelSchema(l.labelId, l.revisionId, accessToken))
+  );
+
+  toResolve.forEach((l, i) => {
+    const settled = schemas[i];
+    const schema = settled.status === 'fulfilled' ? settled.value : undefined;
+    if (!schema) {
+      if (!error) error = 'incomplete label resolution';
+      console.warn(
+        `getFileLabels: label resolve failed fileId=${fileId} labelId=${l.labelId} error=${(settled as PromiseRejectedResult).reason?.message}`
+      );
+    }
+    let unresolved = false;
+    for (const { fieldId, choiceIds } of l.selections) {
+      for (const choiceId of choiceIds) {
+        const name = schema?.[fieldId]?.[choiceId];
+        labels.push({
+          labelId: l.labelId,
+          fieldId,
+          valueType: 'selection',
+          value: name ?? choiceId,
+          resolved: name !== undefined,
+        });
+        if (name === undefined) unresolved = true;
+      }
+    }
+    if (unresolved && schema) {
+      if (!error) error = 'incomplete label resolution';
+      console.warn(`getFileLabels: unresolved choice fileId=${fileId} labelId=${l.labelId}`);
+    }
+  });
+
+  const seen = new Set<string>();
+  const deduped = labels.filter((l) => {
+    const key = `${l.labelId}\u0000${l.fieldId}\u0000${l.valueType}\u0000${l.value}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return {
+    labels: deduped,
+    ...(error ? { error } : {}),
+    ...(skipped ? { skipped: true } : {}),
+  };
 }
 
 // Reusable output schema fragments — tolerant (all leaves optional, passthrough outer)
@@ -1177,8 +1234,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           scanned: z.boolean().optional().describe('True when a PDF is image-only'),
           truncated: z.boolean().optional(),
           message: z.string().optional().describe('Why content is absent or partial'),
-          labels: z.array(z.string()).optional(),
-          labelsError: z.string().optional(),
         },
         schema: {
           file_id: z.string().describe('The Google Drive file ID (from search_files).'),
@@ -1186,24 +1241,21 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
           const { accessToken } = context;
 
-          try {
-            // 1. Fetch metadata (to branch on the *actual* mimeType) and the file's
-            // Drive labels in parallel.
-            const [meta, { labels, error: labelsError }] = await Promise.all([
-              makeDriveRequest(
-                `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,size,webViewLink&supportsAllDrives=true`,
-                accessToken
-              ),
-              getFileLabels(file_id, accessToken),
-            ]);
+          // Label enrichment needs drive.labels.readonly, which frozen profiles
+          // like standard do not carry. Deployments whose grant lacks it skip
+          // the label API calls entirely instead of paying a guaranteed 403
+          const granted = grantedScopes();
+          const labelsEnabled = granted === null || granted.has(SCOPES.DRIVE_LABELS_READONLY);
 
-            // Expose label values on _meta on every return path — including error
-            // envelopes that leak metadata (name, webViewLink) — so policy
-            // middleware can act on them.
-            const resultMeta: Record<string, unknown> = { labels };
-            if (labelsError) {
-              resultMeta.labelsError = labelsError;
-            }
+          // Started before run() so it resolves in parallel with the metadata
+          // fetch; never rejects
+          const labelsPromise = labelsEnabled ? getFileLabels(file_id, accessToken) : null;
+
+          const run = async () => {
+            const meta = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,size,webViewLink&supportsAllDrives=true`,
+              accessToken
+            );
 
             const mimeType: string = meta.mimeType || '';
             const size = meta.size ? parseInt(meta.size) : 0;
@@ -1213,23 +1265,16 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
 
             if (kind === 'native-doc' || kind === 'unsupported') {
-              return {
-                ...formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink))),
-                _meta: resultMeta,
-              };
+              return formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink)));
             }
 
             if (size > MAX_FILE_SIZE) {
-              return {
-                ...formatDriveError(new Error(
-                  `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
-                  `Open in browser instead: ${webViewLink}.`
-                )),
-                _meta: resultMeta,
-              };
+              return formatDriveError(new Error(
+                `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
+                `Open in browser instead: ${webViewLink}.`
+              ));
             }
 
-            // 2. Download bytes.
             const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
             const response = await fetch(downloadUrl, {
               headers: { 'Authorization': `Bearer ${accessToken}` },
@@ -1243,13 +1288,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             }
 
-            // Keep labelsError beside labels in the visible body too, so a consumer
-            // reading structuredContent can't mistake a failed resolution for a clean [].
-            const fileMeta = {
-              id: meta.id, name, mimeType, size, webViewLink,
-              labels,
-              ...(labelsError ? { labelsError } : {}),
-            };
+            const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
             const jsonBlock = (payload: unknown) => ({
               type: 'text' as const,
               text: JSON.stringify(payload, null, 2),
@@ -1315,7 +1354,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
                 };
               }
 
-              return { content: [jsonBlock(result)], structuredContent: result, _meta: resultMeta };
+              return { content: [jsonBlock(result)], structuredContent: result };
             }
 
             if (kind === 'image') {
@@ -1323,6 +1362,9 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               // Node ≥22 is declared in package.json; Buffer is safe and avoids
               // the O(n²) String.fromCharCode chunking required by btoa.
               const base64Data = Buffer.from(arrayBuffer).toString('base64');
+              // The SDK rejects results that declare an outputSchema but omit
+              // structuredContent, so the binary path returns the metadata
+              // envelope there and keeps the bytes in the content blocks
               const imageMeta = { ...fileMeta, extraction: 'image' as const };
               return {
                 content: [
@@ -1330,7 +1372,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
                   { type: 'image' as const, data: base64Data, mimeType },
                 ],
                 structuredContent: imageMeta,
-                _meta: resultMeta,
               };
             }
 
@@ -1340,11 +1381,28 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             return {
               content: [jsonBlock(result)],
               structuredContent: result,
-              _meta: resultMeta,
             };
+          };
+
+          // _meta is attached at this single exit, the catch included, so no
+          // return path can forget it
+          let result: Record<string, unknown>;
+          try {
+            result = await run();
           } catch (err) {
-            return formatDriveError(err);
+            result = formatDriveError(err);
           }
+          if (!labelsPromise) return result;
+
+          const { labels, error, skipped } = await labelsPromise;
+          return {
+            ...result,
+            _meta: {
+              labels,
+              ...(error ? { labelsError: error } : {}),
+              ...(skipped ? { labelsSkipped: true } : {}),
+            },
+          };
         }),
       },
 

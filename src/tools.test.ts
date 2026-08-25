@@ -19,8 +19,9 @@ import {
   formatDriveFile,
   getLabelSchema,
   getFileLabels,
-  clearLabelSchemaCache,
+  GoogleDriveTools,
 } from './tools.js';
+import { requestContext } from './auth.js';
 
 describe('escapeDriveQValue', () => {
   it('escapes apostrophes', () => {
@@ -529,7 +530,7 @@ describe('decodeUploadContent on large payloads', () => {
 
 
 // ---------------------------------------------------------------------------
-// Drive Labels — getLabelSchema / getFileLabels
+// Drive Labels: getLabelSchema / getFileLabels
 // ---------------------------------------------------------------------------
 
 /**
@@ -568,12 +569,11 @@ const LABEL_SCHEMA_BODY = {
         ],
       },
     },
-    { id: 'textField' }, // non-selection field — no choices to map
+    { id: 'textField' }, // non-selection field, no choices to map
   ],
 };
 
 describe('getLabelSchema', () => {
-  beforeEach(() => clearLabelSchemaCache());
   afterEach(() => vi.unstubAllGlobals());
 
   it('maps fieldId -> choiceId -> displayName and skips nameless choices', async () => {
@@ -588,19 +588,15 @@ describe('getLabelSchema', () => {
     expect(calls[0]).toContain('/labels/lbl1@rev7?view=LABEL_VIEW_FULL');
   });
 
-  it('caches by label@revision — second call does not refetch', async () => {
+  it('never reuses a fetch across calls: each request re-authorizes with its own token', async () => {
     const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)]]);
-    await getLabelSchema('lbl1', 'rev7', 'tok');
-    await getLabelSchema('lbl1', 'rev7', 'tok');
-    expect(calls.length).toBe(1);
-    // ...but a different revision is a different cache key.
-    await getLabelSchema('lbl1', 'rev8', 'tok');
+    await getLabelSchema('lbl1', 'rev7', 'tokUserA');
+    await getLabelSchema('lbl1', 'rev7', 'tokUserB');
     expect(calls.length).toBe(2);
   });
 });
 
 describe('getFileLabels', () => {
-  beforeEach(() => clearLabelSchemaCache());
   afterEach(() => vi.unstubAllGlobals());
 
   const appliedSelection = {
@@ -609,6 +605,13 @@ describe('getFileLabels', () => {
     fields: {
       field1: { valueType: 'selection', selection: ['choiceA'] },
     },
+  };
+  const confidential = {
+    labelId: 'lbl1',
+    fieldId: 'field1',
+    valueType: 'selection',
+    value: 'Confidential',
+    resolved: true,
   };
 
   it('returns [] and no error for an unlabeled file', async () => {
@@ -623,10 +626,10 @@ describe('getFileLabels', () => {
       ['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)],
     ]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res).toEqual({ labels: ['Confidential'] });
+    expect(res).toEqual({ labels: [confidential] });
   });
 
-  it('surfaces text-field values directly and dedupes across labels', async () => {
+  it('tags text-field values as text so a gate can tell them from taxonomy', async () => {
     const applied = [
       appliedSelection,
       {
@@ -639,21 +642,38 @@ describe('getFileLabels', () => {
       ['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)],
     ]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res.labels.sort()).toEqual(['Confidential', 'Legal Hold']);
+    expect(res.labels).toContainEqual(confidential);
+    expect(res.labels).toContainEqual({
+      labelId: 'lbl2', fieldId: 't', valueType: 'text', value: 'Confidential', resolved: true,
+    });
+    expect(res.labels).toContainEqual({
+      labelId: 'lbl2', fieldId: 't', valueType: 'text', value: 'Legal Hold', resolved: true,
+    });
     expect(res.error).toBeUndefined();
   });
 
-  it('skips date/integer/user fields as non-classificatory', async () => {
+  it('does not fetch a schema when no field needs resolving', async () => {
+    const applied = [{ id: 'lbl2', fields: { t: { valueType: 'text', text: ['Internal'] } } }];
+    const calls = stubFetch([['listLabels', () => jsonResponse({ labels: applied })]]);
+    const res = await getFileLabels('f1', 'tok');
+    expect(res.labels).toHaveLength(1);
+    expect(calls.length).toBe(1);
+  });
+
+  it('flags skipped for date/integer/user fields instead of reporting a clean []', async () => {
     const applied = [{
       id: 'lbl3',
       fields: {
         d: { valueType: 'dateString', dateString: ['2026-01-01'] },
         i: { valueType: 'integer', integer: ['5'] },
+        u: { valueType: 'user', user: [{ emailAddress: 'a@b.c' }] },
       },
     }];
     stubFetch([['listLabels', () => jsonResponse({ labels: applied })]]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res).toEqual({ labels: [] });
+    expect(res.labels).toEqual([]);
+    expect(res.skipped).toBe(true);
+    expect(res.error).toBeUndefined();
   });
 
   it('follows listLabels pagination', async () => {
@@ -668,7 +688,24 @@ describe('getFileLabels', () => {
     ]);
     const res = await getFileLabels('f1', 'tok');
     expect(page).toBe(2);
-    expect(res.labels).toEqual(['Internal']);
+    expect(res.labels.map((l) => l.value)).toEqual(['Internal']);
+  });
+
+  it('stops at the page cap and reports the partial read as a failure', async () => {
+    let page = 0;
+    stubFetch([
+      ['listLabels', () => {
+        page += 1;
+        return jsonResponse({
+          labels: [{ id: `lbl${page}`, fields: { t: { valueType: 'text', text: [`v${page}`] } } }],
+          nextPageToken: 'again',
+        });
+      }],
+    ]);
+    const res = await getFileLabels('f1', 'tok');
+    expect(page).toBe(10);
+    expect(res.labels).toHaveLength(10);
+    expect(res.error).toBe('label read failed');
   });
 
   it('flags "label read failed" when listLabels errors (e.g. missing scope 403)', async () => {
@@ -680,7 +717,7 @@ describe('getFileLabels', () => {
     expect(res.error).toBe('label read failed');
   });
 
-  it('surfaces the raw choice id and flags "incomplete label resolution" when the schema lacks the choice', async () => {
+  it('marks an unknown choice unresolved, keeps its raw id, and flags the miss', async () => {
     const applied = [{
       id: 'lbl1',
       revisionId: 'rev7',
@@ -691,25 +728,32 @@ describe('getFileLabels', () => {
       ['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)],
     ]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res.labels).toEqual(['choiceUnknown']);
+    expect(res.labels).toEqual([{
+      labelId: 'lbl1', fieldId: 'field1', valueType: 'selection', value: 'choiceUnknown', resolved: false,
+    }]);
     expect(res.error).toBe('incomplete label resolution');
   });
 
-  it('keeps values from other labels when one schema fetch fails', async () => {
+  it('keeps values from labels after the one whose schema fetch fails', async () => {
     const applied = [
-      { id: 'lblGood', fields: { t: { valueType: 'text', text: ['Internal'] } } },
       appliedSelection,
+      { id: 'lblGood', fields: { t: { valueType: 'text', text: ['Internal'] } } },
     ];
     stubFetch([
       ['listLabels', () => jsonResponse({ labels: applied })],
       ['drivelabels.googleapis.com', () => jsonResponse({ error: { message: 'nope' } }, 403)],
     ]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res.labels).toEqual(['Internal']);
+    expect(res.labels).toContainEqual({
+      labelId: 'lblGood', fieldId: 't', valueType: 'text', value: 'Internal', resolved: true,
+    });
+    expect(res.labels).toContainEqual({
+      labelId: 'lbl1', fieldId: 'field1', valueType: 'selection', value: 'choiceA', resolved: false,
+    });
     expect(res.error).toBe('incomplete label resolution');
   });
 
-  it('keeps the stronger "label read failed" signal when a later choice is also unresolved', async () => {
+  it('first error wins: a read failure is not overwritten by a later resolve miss', async () => {
     let page = 0;
     stubFetch([
       ['listLabels', () => {
@@ -724,7 +768,106 @@ describe('getFileLabels', () => {
       ['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)],
     ]);
     const res = await getFileLabels('f1', 'tok');
-    expect(res.labels).toEqual(['choiceUnknown']);
+    expect(res.labels.map((l) => l.value)).toEqual(['choiceUnknown']);
     expect(res.error).toBe('label read failed');
   });
+
+  it('caps text values so free-form fields cannot flood the result', async () => {
+    const applied = [{ id: 'lbl2', fields: { t: { valueType: 'text', text: ['x'.repeat(1000)] } } }];
+    stubFetch([['listLabels', () => jsonResponse({ labels: applied })]]);
+    const res = await getFileLabels('f1', 'tok');
+    expect(res.labels[0].value).toHaveLength(256);
+  });
 });
+
+// ---------------------------------------------------------------------------
+// get_file handler: the _meta contract
+// ---------------------------------------------------------------------------
+
+describe('get_file handler _meta', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.PROFILE;
+  });
+
+  const getFile = (GoogleDriveTools.getTools() as any).get_file.handler;
+  const callGetFile = (fileId: string) =>
+    requestContext.run({ accessToken: 'tok' }, () => getFile({ file_id: fileId }));
+
+  const FILE_META = { id: 'f1', name: 'a.txt', mimeType: 'text/plain', size: '5', webViewLink: 'https://x' };
+  const metaRoute: [string, (url: string) => Response] = [
+    'fields=id,name,mimeType,size,webViewLink', () => jsonResponse(FILE_META),
+  ];
+  const labelsRoute: [string, (url: string) => Response] = [
+    'listLabels', () => jsonResponse({ labels: [{ id: 'lbl2', fields: { t: { valueType: 'text', text: ['Internal'] } } }] }),
+  ];
+
+  it('attaches _meta.labels on a successful text read', async () => {
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res._meta.labels).toEqual([{
+      labelId: 'lbl2', fieldId: 't', valueType: 'text', value: 'Internal', resolved: true,
+    }]);
+    expect(res.structuredContent.labels).toBeUndefined();
+  });
+
+  it('attaches _meta.labels on a download-failure error envelope', async () => {
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      ['alt=media', () => new Response('forbidden', { status: 403 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.labels).toHaveLength(1);
+  });
+
+  it('attaches _meta.labels even when the metadata fetch itself fails', async () => {
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({ error: { message: 'not found' } }, 404)],
+      labelsRoute,
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.labels).toHaveLength(1);
+  });
+
+  it('attaches _meta.labels on the unsupported-mime error envelope', async () => {
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({ ...FILE_META, mimeType: 'application/zip' })],
+      labelsRoute,
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.labels).toHaveLength(1);
+  });
+
+  it('skips label calls and omits _meta when the profile lacks the labels scope', async () => {
+    process.env.PROFILE = 'standard';
+    const calls = stubFetch([
+      metaRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res._meta).toBeUndefined();
+    expect(calls.some((u) => u.includes('listLabels'))).toBe(false);
+  });
+
+  it('runs label enrichment under the standard-labels profile', async () => {
+    process.env.PROFILE = 'standard-labels';
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res._meta.labels).toHaveLength(1);
+  });
+});
+
