@@ -30,6 +30,16 @@ describe("grantedScopes", () => {
     expect(granted).toEqual(new Set([SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE]));
   });
 
+  test("labels-write adds the metadata scope for label writes", () => {
+    const granted = grantedScopes("labels-write");
+    expect(granted).toEqual(new Set([
+      SCOPES.DRIVE_READONLY,
+      SCOPES.DRIVE_FILE,
+      SCOPES.DRIVE_LABELS_READONLY,
+      SCOPES.DRIVE_METADATA,
+    ]));
+  });
+
   test("expands implied scopes, so full covers the narrow grants", () => {
     const granted = grantedScopes("full");
     expect(granted?.has(SCOPES.DRIVE_FILE)).toBe(true);

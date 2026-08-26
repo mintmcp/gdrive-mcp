@@ -3,6 +3,7 @@ export const SCOPES = {
   DRIVE_FILE: "https://www.googleapis.com/auth/drive.file",
   DRIVE_READONLY: "https://www.googleapis.com/auth/drive.readonly",
   DRIVE_LABELS_READONLY: "https://www.googleapis.com/auth/drive.labels.readonly",
+  DRIVE_METADATA: "https://www.googleapis.com/auth/drive.metadata",
 } as const;
 
 // Editing a profile forces every user of its connector to re-consent, so
@@ -12,6 +13,12 @@ export const SCOPES = {
 export const PROFILES: Record<string, readonly string[]> = {
   "standard": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
   "labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
+  "labels-write": [
+    SCOPES.DRIVE_READONLY,
+    SCOPES.DRIVE_FILE,
+    SCOPES.DRIVE_LABELS_READONLY,
+    SCOPES.DRIVE_METADATA,
+  ],
   "full": [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
 };
 
