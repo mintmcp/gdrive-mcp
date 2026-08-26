@@ -22,17 +22,9 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/userinfo.profile`
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
-- `https://www.googleapis.com/auth/drive.labels.readonly` — optional, carried
-  only by the `standard-labels` and `full` profiles. Enables `get_file`'s
-  Drive-label enrichment: applied labels are surfaced on the tool result's
-  `_meta.labels` as `{labelId, fieldId, valueType, value, resolved}` entries so
-  policy middleware can act on them. Selection choices are admin-defined
-  taxonomy; `text` values are free form and writable by anyone with edit rights
-  on the file, so a gate must not trust them alike. `_meta.labelsError` flags a
-  failed read/resolution and `_meta.labelsSkipped` flags label fields the
-  connector does not render; either means "classification unknown", not
-  "unlabeled". When the deployment's grant lacks this scope, `get_file` skips
-  the label API calls entirely and returns no `_meta`.
+- `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
+  the `standard-labels` and `full` profiles; enables `get_file`'s label
+  enrichment (see [Drive label enrichment](#drive-label-enrichment))
 
 ## Tools
 
@@ -58,6 +50,15 @@ results (metadata, IDs, search hits, text file bodies) return
 (images as `type: "image"`, PDFs as `type: "resource"` with the base64
 payload). Errors route through a single envelope with HTTP status,
 reason, and a corrective hint.
+
+## Drive label enrichment
+
+On deployments whose grant includes `drive.labels.readonly`, `get_file`
+surfaces the file's applied Drive labels on the tool result's `_meta.labels`
+as `{labelId, fieldId, valueType, value, resolved}` entries. Without the
+scope, the label API calls are skipped entirely and no `_meta` is returned.
+`_meta.labelsError` flags a failed read or resolution; `_meta.labelsSkipped`
+flags label fields the connector does not render.
 
 ## Profiles
 
