@@ -1528,6 +1528,60 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           }
         }),
       },
+
+      set_file_label: {
+        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Use remove_file_label to strip a label. The label and its fields must already exist and be published; label_id and field_id come from the Drive admin or from get_file results (_meta.labels).',
+        outputSchema: {
+          modifiedLabels: z.array(
+            z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
+          ).optional(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file ID.'),
+          label_id: z.string().describe('ID of the published label to apply or update.'),
+          fields: z.array(z.object({
+            field_id: z.string().describe('Server-assigned field ID within the label.'),
+            date_value: z.string().optional().describe('Date field value, YYYY-MM-DD. Drive date fields are day-granular.'),
+            text_values: z.array(z.string()).optional().describe('Text field values.'),
+            selection_choice_ids: z.array(z.string()).optional().describe('Selection field choice IDs.'),
+          })).min(1).describe('Exactly one value kind per field entry.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id, fields }: any, context: any) => {
+          const { accessToken } = context;
+
+          let fieldModifications: Array<Record<string, unknown>>;
+          try {
+            fieldModifications = buildFieldModifications(fields);
+          } catch (err) {
+            return formatDriveError(err);
+          }
+
+          try {
+            const result = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/modifyLabels`,
+              accessToken,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  labelModifications: [{ labelId: label_id, fieldModifications }],
+                }),
+              }
+            );
+            const output = {
+              modifiedLabels: result?.modifiedLabels ?? [],
+              message: 'Label set successfully',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
     };
   }
 }

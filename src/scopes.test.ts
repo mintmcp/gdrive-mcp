@@ -70,7 +70,7 @@ function toolNames(granted: Set<string> | null): string[] {
   return Object.keys((server as any)._registeredTools ?? {}).sort();
 }
 
-const ALL_TOOLS = [
+const CORE_TOOLS = [
   "copy_file",
   "create_folder",
   "get_file",
@@ -85,17 +85,24 @@ const ALL_TOOLS = [
   "upload_file",
 ].sort();
 
+const ALL_TOOLS = [...CORE_TOOLS, "set_file_label"].sort();
+
 describe("createServer tool surface", () => {
   test("unrestricted registers every tool", () => {
     expect(toolNames(null)).toEqual(ALL_TOOLS);
   });
 
-  test("the standard profile registers every tool", () => {
-    expect(toolNames(grantedScopes("standard"))).toEqual(ALL_TOOLS);
+  test("the standard profile registers the core tools but no label writes", () => {
+    expect(toolNames(grantedScopes("standard"))).toEqual(CORE_TOOLS);
   });
 
-  test("the full profile registers every tool, via the implication map", () => {
-    expect(toolNames(grantedScopes("full"))).toEqual(ALL_TOOLS);
+  test("standard-labels-write registers the label write tools", () => {
+    expect(toolNames(grantedScopes("standard-labels-write")))
+      .toEqual([...CORE_TOOLS, "set_file_label"].sort());
+  });
+
+  test("the full profile registers the core tools, via the implication map", () => {
+    expect(toolNames(grantedScopes("full"))).toEqual(CORE_TOOLS);
   });
 
   test("every profile's tools are a subset of the unrestricted surface", () => {

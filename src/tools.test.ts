@@ -494,6 +494,60 @@ describe('buildFieldModifications', () => {
       .toThrow(/empty/);
     expect(() => buildFieldModifications([])).toThrow(/at least one field/);
   });
+});
+
+describe('set_file_label / remove_file_label handlers', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const tools = GoogleDriveTools.getTools() as any;
+  const call = (tool: string, args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () => tools[tool].handler(args));
+
+  it('POSTs modifyLabels with the built fieldModifications', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lbl1', revisionId: 'rev7' }] })],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', date_value: '2026-08-30' }],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].url).toContain('/files/f1/modifyLabels');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{
+        labelId: 'lbl1',
+        fieldModifications: [{ fieldId: 'fld1', setDateValues: ['2026-08-30'] }],
+      }],
+    });
+    expect(res.structuredContent.modifiedLabels).toEqual([{ id: 'lbl1', revisionId: 'rev7' }]);
+  });
+
+  it('returns a tool error without calling the API on invalid fields', async () => {
+    const calls = stubFetch([]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1' }],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/exactly one of/);
+    expect(calls.length).toBe(0);
+  });
+
+  it('passes API errors through formatDriveError', async () => {
+    stubFetch([
+      ['modifyLabels', () => jsonResponse({ error: { message: 'The user has not granted the app...' } }, 403)],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', text_values: ['x'] }],
+    });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).status).toBe(403);
+  });
+});
 
 describe('get_file handler _meta', () => {
   afterEach(() => {
