@@ -85,7 +85,7 @@ const CORE_TOOLS = [
   "upload_file",
 ].sort();
 
-const ALL_TOOLS = [...CORE_TOOLS, "set_file_label"].sort();
+const ALL_TOOLS = [...CORE_TOOLS, "remove_file_label", "set_file_label"].sort();
 
 describe("createServer tool surface", () => {
   test("unrestricted registers every tool", () => {
@@ -98,7 +98,7 @@ describe("createServer tool surface", () => {
 
   test("standard-labels-write registers the label write tools", () => {
     expect(toolNames(grantedScopes("standard-labels-write")))
-      .toEqual([...CORE_TOOLS, "set_file_label"].sort());
+      .toEqual([...CORE_TOOLS, "remove_file_label", "set_file_label"].sort());
   });
 
   test("the full profile registers the core tools, via the implication map", () => {

@@ -1582,6 +1582,42 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           }
         }),
       },
+
+      remove_file_label: {
+        description: 'Remove a Google Drive label from a file entirely (all its field values with it). Counterpart to set_file_label; removing a label is always safe and reversible by setting it again.',
+        destructiveHint: true,
+        outputSchema: {
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file ID.'),
+          label_id: z.string().describe('ID of the label to remove.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/modifyLabels`,
+              accessToken,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  labelModifications: [{ labelId: label_id, removeLabel: true }],
+                }),
+              }
+            );
+            const output = { message: 'Label removed successfully' };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
     };
   }
 }
