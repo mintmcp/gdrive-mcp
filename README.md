@@ -25,6 +25,9 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
   the `labels` and `full` profiles; enables `get_file`'s label
   enrichment (see [Drive label enrichment](#drive-label-enrichment))
+- `https://www.googleapis.com/auth/drive.metadata` — optional, only in the
+  `labels-write` profile; enables `set_file_label` /
+  `remove_file_label` (see [Label write tools](#label-write-tools))
 
 ## Tools
 
@@ -42,6 +45,8 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
 | Upload          | `upload_file`          | Text or base64 content; optional convert to a Google type. |
+| Labels          | `set_file_label`       | Apply/update a label's date, text, or selection values.    |
+|                 | `remove_file_label`    | Strip a label (and its values) from a file.                |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
 results (metadata, IDs, search hits, text file bodies) return
@@ -68,6 +73,19 @@ are human overlays. `_meta.labelsError` flags a failed read or resolution.
 Without the scope, the label API calls are skipped entirely and no `_meta`
 is returned; absence means "surfacing not enabled", never "no labels".
 
+### Label write tools
+
+`set_file_label` / `remove_file_label` are generic wrappers over Drive
+`files.modifyLabels`, registered only when the grant includes
+`drive.metadata`. The connector never interprets labels; which label means
+what is policy, decided elsewhere. Note `drive.file` is NOT enough here: it
+403s on files the app did not create.
+
+Label creation and publishing stay a one-time Workspace-admin action outside
+the connector; callers supply `label_id` / `field_id` (both server-assigned).
+Platform approval rules can gate `set_file_label` while leaving
+`remove_file_label` ungated — revoking is always safe.
+
 ## Profiles
 
 A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
@@ -76,7 +94,8 @@ a connector's contract with its users:
 | Profile           | Scopes                                                    |
 |-------------------|-----------------------------------------------------------|
 | `standard`        | `drive.readonly` + `drive.file`                           |
-| `labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `labels`          | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `labels-write`    | `drive.readonly` + `drive.file` + `drive.labels.readonly` + `drive.metadata` |
 | `full`            | `drive` + `drive.labels.readonly`                         |
 
 Each tool declares the Google scope it needs (the first argument to
@@ -87,6 +106,7 @@ Each tool declares the Google scope it needs (the first argument to
 | `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
 | `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
+| `drive.metadata`        | `set_file_label`, `remove_file_label`                   |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
