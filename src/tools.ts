@@ -2,6 +2,7 @@
  * Google Drive MCP Tools
  */
 
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
@@ -45,6 +46,16 @@ const OFFICE_ROUTES: Record<string, string> = {
     'This is a legacy Excel (.xls) file, which cannot be read directly. Open it and use File → Save as Google Sheets first.',
   'application/msword':
     'This is a legacy Word (.doc) file — use the Google Docs MCP server to read it.',
+};
+
+const GOOGLE_NATIVE_CREATORS: Record<string, string> = {
+  'application/vnd.google-apps.document':
+    'To author a Google Doc, use create_document on the Google Docs MCP server.',
+  'application/vnd.google-apps.spreadsheet':
+    'To author a Google Sheet, use create_spreadsheet on the Google Sheets MCP server.',
+  'application/vnd.google-apps.presentation':
+    'To author a Google Slides deck, use create_presentation on the Google Slides MCP server.',
+  'application/vnd.google-apps.folder': 'To make a folder, use create_folder.',
 };
 
 /**
@@ -107,6 +118,211 @@ export function validateWorkspaceDomain(
   return { ok: true, domain: trimmed };
 }
 
+// Google's documented ceiling for a multipart upload. A caller hits the model's
+// own output limit long before this, so it is a backstop rather than the
+// advertised size: stating it in the tool description only misdirects
+const MAX_UPLOAD_SIZE = 5 * 1024 * 1024;
+
+const EXTENSION_MIME_TYPES: Record<string, string> = {
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  ppt: 'application/vnd.ms-powerpoint',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  doc: 'application/msword',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xls: 'application/vnd.ms-excel',
+  csv: 'text/csv',
+  tsv: 'text/tab-separated-values',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  html: 'text/html',
+  htm: 'text/html',
+  json: 'application/json',
+  xml: 'application/xml',
+  rtf: 'application/rtf',
+  odt: 'application/vnd.oasis.opendocument.text',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  zip: 'application/zip',
+  mp4: 'video/mp4',
+  mp3: 'audio/mpeg',
+};
+
+/**
+ * MIME type for an upload whose caller did not declare one. An unknown or
+ * missing extension falls back to the encoding default so a bad guess never
+ * blocks the upload
+ */
+export function inferMimeTypeFromName(name: string, encoding: 'text' | 'base64'): string {
+  const dot = name.lastIndexOf('.');
+  const ext = dot > -1 ? name.slice(dot + 1).toLowerCase() : '';
+  return EXTENSION_MIME_TYPES[ext] ?? (encoding === 'base64' ? 'application/octet-stream' : 'text/plain');
+}
+
+const GOOGLE_CONVERSION_TARGETS: Record<string, string> = {
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'application/vnd.google-apps.presentation',
+  'application/vnd.ms-powerpoint': 'application/vnd.google-apps.presentation',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'application/vnd.google-apps.document',
+  'application/msword': 'application/vnd.google-apps.document',
+  'application/rtf': 'application/vnd.google-apps.document',
+  'text/plain': 'application/vnd.google-apps.document',
+  'text/markdown': 'application/vnd.google-apps.document',
+  'text/html': 'application/vnd.google-apps.document',
+  'application/vnd.oasis.opendocument.text': 'application/vnd.google-apps.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'application/vnd.google-apps.spreadsheet',
+  'application/vnd.ms-excel': 'application/vnd.google-apps.spreadsheet',
+  'application/vnd.oasis.opendocument.spreadsheet': 'application/vnd.google-apps.spreadsheet',
+  'text/csv': 'application/vnd.google-apps.spreadsheet',
+  'text/tab-separated-values': 'application/vnd.google-apps.spreadsheet',
+  'application/vnd.oasis.opendocument.presentation': 'application/vnd.google-apps.presentation',
+};
+
+// RFC 9110 media type: two `token`s, then optional `;` parameters. Anything
+// else (control characters especially) would be interpolated into a
+// multipart part header and could forge part boundaries
+const MEDIA_TYPE_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|~-]+(?:[ \t]*;[ \t]*[A-Za-z0-9!#$%&'*+.^_`|~-]+=(?:"[^"\\\r\n]*"|[A-Za-z0-9!#$%&'*+.^_`|~-]+))*$/;
+
+/**
+ * Validate a caller-supplied MIME type and split off its parameters. The full
+ * value goes in the part header, while `essence` is the lowercased type/subtype
+ * used for map lookups, so `Text/CSV; charset=utf-8` still resolves
+ */
+export function parseMimeType(
+  input: string,
+): { ok: true; mimeType: string; essence: string } | { ok: false; error: string } {
+  const trimmed = input.trim();
+  if (!MEDIA_TYPE_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      error: `mime_type "${input}" is not a valid MIME type. Expected something like "application/pdf" or "text/csv; charset=utf-8".`,
+    };
+  }
+  return { ok: true, mimeType: trimmed, essence: trimmed.split(';')[0].trim().toLowerCase() };
+}
+
+const BINARY_MIME_PREFIXES = ['image/', 'audio/', 'video/', 'font/'];
+const BINARY_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/zip',
+  'application/octet-stream',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/msword',
+  'application/vnd.ms-excel',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.presentation',
+]);
+
+/**
+ * Whether a type can only be carried as base64. Uploading UTF-8 text under one
+ * of these produces a corrupt file that Drive still reports as created
+ */
+export function requiresBase64(essence: string): boolean {
+  if (essence === 'image/svg+xml') return false;
+  return BINARY_MIME_PREFIXES.some((prefix) => essence.startsWith(prefix)) || BINARY_MIME_TYPES.has(essence);
+}
+
+// Buffer.from is lenient and silently drops junk, which would upload a corrupt
+// file. Scanned with a flat character class: a {4}-group repetition overflows
+// V8's backtrack stack a few MB in
+const BASE64_ALPHABET = /^[A-Za-z0-9+/]*$/;
+
+function isStandardBase64(value: string): boolean {
+  if (value.length % 4 !== 0) return false;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return BASE64_ALPHABET.test(value.slice(0, value.length - padding));
+}
+
+/**
+ * Decode caller-supplied file content into the bytes to upload. Whitespace in
+ * base64 input is ignored because line-wrapped base64 is common; anything else
+ * outside the alphabet is rejected rather than silently dropped
+ */
+export function decodeUploadContent(
+  content: string | undefined,
+  encoding: 'text' | 'base64',
+  maxBytes: number,
+): { ok: true; bytes: Buffer } | { ok: false; error: string } {
+  if (content !== undefined && typeof content !== 'string') {
+    return { ok: false, error: 'content must be a string.' };
+  }
+  const raw = content ?? '';
+  const tooLarge = (bytes: number) => ({
+    ok: false as const,
+    error:
+      `content is ${bytes} bytes, which exceeds the ${maxBytes}-byte limit for this tool. ` +
+      `Upload a smaller file, or split the content across several files.`,
+  });
+  // UTF-8 never encodes a UTF-16 unit in under a byte, and base64 never
+  // deflates, so both bounds hold before anything is allocated
+  if (raw.length > maxBytes * 2) {
+    return tooLarge(raw.length);
+  }
+  if (encoding === 'text') {
+    const bytes = Buffer.from(raw, 'utf8');
+    return bytes.length > maxBytes ? tooLarge(bytes.length) : { ok: true, bytes };
+  }
+  const stripped = raw.replace(/\s+/g, '');
+  if (raw.length > 0 && stripped.length === 0) {
+    return { ok: false, error: 'content is only whitespace, which would create an empty file. Pass base64 data or omit content.' };
+  }
+  if (!isStandardBase64(stripped)) {
+    // Every alphabet character but a length that is not a multiple of four means
+    // the payload stops mid-quantum. Re-encoding is not the fix, so say so
+    if (BASE64_ALPHABET.test(stripped) && stripped.length % 4 !== 0) {
+      return {
+        ok: false,
+        error:
+          `content ends mid-sequence after ${stripped.length} base64 characters, so it was cut off rather than malformed. ` +
+          `The whole payload has to fit in one tool call, so a large file may not survive being passed inline. ` +
+          `Try a smaller file, split the content across several files, or add this file to Drive directly and use search_files to work with it.`,
+      };
+    }
+    return {
+      ok: false,
+      error:
+        'content is not valid base64. With content_encoding="base64", content must use the standard base64 alphabet ' +
+        '(A-Z, a-z, 0-9, +, /) with correct "=" padding. Line breaks and spaces are allowed and ignored. ' +
+        'Pass content_encoding="text" for plain-text files.',
+    };
+  }
+  // Size the payload from its encoded length: decoding first would allocate
+  // several times a hostile payload before the limit could be checked
+  const padding = stripped.endsWith('==') ? 2 : stripped.endsWith('=') ? 1 : 0;
+  const size = (stripped.length / 4) * 3 - padding;
+  if (size > maxBytes) return tooLarge(size);
+  return { ok: true, bytes: Buffer.from(stripped, 'base64') };
+}
+
+/**
+ * Built as a Buffer so binary payloads survive intact
+ */
+export function buildMultipartBody(
+  metadata: Record<string, unknown>,
+  sourceMime: string,
+  bytes: Uint8Array,
+  boundary: string,
+): Buffer {
+  return Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: ${sourceMime}\r\n\r\n`,
+      'utf8',
+    ),
+    bytes,
+    Buffer.from(`\r\n--${boundary}--`, 'utf8'),
+  ]);
+}
+
 // Retry tuning for transient Drive errors (429 / 5xx).
 const MAX_RETRY_ATTEMPTS = 3;          // total attempts including the first
 const BASE_BACKOFF_MS = 500;
@@ -131,10 +347,10 @@ export class DriveApiError extends Error {
 }
 
 /**
- * Convert a thrown error into the structured MCP tool error envelope.
+ * Convert a thrown error into the MCP tool error envelope.
  * Adds status-specific hints so the LLM can self-correct.
  */
-export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; structuredContent: any; isError: true } {
+export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let status: number | undefined;
   let reason: string | undefined;
   let message: string;
@@ -177,9 +393,11 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
   if (reason) payload.reason = reason;
   if (hint) payload.hint = hint;
 
+  // No structuredContent: clients validate it against outputSchema even on an
+  // error result, and an error shape can never satisfy a success schema, so
+  // attaching it replaces every message below with an opaque -32602
   return {
     content: [{ type: 'text', text: JSON.stringify(payload) }],
-    structuredContent: payload,
     isError: true,
   };
 }
@@ -337,6 +555,7 @@ Comparisons: contains, =, !=, <, >, <=, >=. Combine with: and, or, not.
 String literals use single quotes; escape internal apostrophes as \\' (e.g. name contains 'O\\\\'Brien'). Always include "trashed = false" unless searching trash.`),
           mime_type: z
             .string()
+            .max(255)
             .optional()
             .describe(`Optional MIME type filter (e.g. 'application/pdf', 'application/vnd.google-apps.folder', 'image/png'). When provided, the tool ANDs "mimeType = '<value>'" onto your query — use this instead of hand-writing mimeType in q to avoid quoting mistakes.`),
           drive_id: z
@@ -502,6 +721,156 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               parents: result.parents,
               webViewLink: result.webViewLink,
               message: `File copied successfully`,
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      upload_file: {
+        description: 'Upload a file to Google Drive from content you supply. Use this when the user asks to upload, save, or generate a file (a presentation, document, spreadsheet, PDF, image, text or JSON file). Pass text content directly, or base64 for binary formats such as .pptx, .pdf, .png or .zip. Set convert_to_google_format to have Drive turn the upload into the matching Google-native format (.pptx/.odp to Slides, .docx/.odt to Docs, .xlsx/.csv/.ods to Sheets). Content has to fit inside this tool call, so prefer small files. Creates a new file every call; it never overwrites an existing one.',
+        outputSchema: {
+          id: z.string(),
+          name: z.string(),
+          mimeType: z.string(),
+          size: z.number().optional(),
+          createdTime: z.string().optional(),
+          modifiedTime: z.string().optional(),
+          parents: z.array(z.string()).optional(),
+          webViewLink: z.string().optional(),
+          message: z.string(),
+        },
+        schema: {
+          name: z.string().max(255).describe('Name of the file to create, including the extension (e.g. "deck.pptx", "notes.md"). The extension is used to infer the MIME type when mime_type is omitted.'),
+          content: z.string().optional().describe('The file body. Omit or pass an empty string to create an empty file. Must be base64 when content_encoding="base64".'),
+          content_encoding: z
+            .enum(['text', 'base64'])
+            .optional()
+            .describe('How content is encoded. "text" (default) uploads it as UTF-8 text. "base64" decodes it first and is required for binary formats such as .pptx, .pdf, .png or .zip.'),
+          mime_type: z
+            .string()
+            .max(255)
+            .optional()
+            .describe('MIME type of the content you are supplying, not the type you want in Drive (use convert_to_google_format for that). Defaults to the type inferred from the name extension, falling back to text/plain for text content and application/octet-stream for base64.'),
+          parent_folder_id: z.string().optional().describe('ID of the folder to create the file in. Omit to place it in My Drive root.'),
+          convert_to_google_format: z
+            .boolean()
+            .optional()
+            .describe('When true, Drive converts the upload into the matching Google-native type: .pptx/.ppt/.odp to Google Slides, .docx/.doc/.odt/.rtf/.txt/.md/.html to Google Docs, .xlsx/.xls/.ods/.csv/.tsv to Google Sheets. Any other source type is rejected, so leave this off to store the file as-is.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ name, content, content_encoding, mime_type, parent_folder_id, convert_to_google_format }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const fileName = name?.trim() ?? '';
+            if (!fileName) {
+              return formatDriveError(new Error('name is required and must not be empty or whitespace.'));
+            }
+
+            const encoding: 'text' | 'base64' = content_encoding === 'base64' ? 'base64' : 'text';
+            const declaredMime = mime_type?.trim() ?? '';
+            let sourceMime = inferMimeTypeFromName(fileName, encoding);
+            let essence = sourceMime;
+            if (declaredMime) {
+              const parsed = parseMimeType(declaredMime);
+              if (!parsed.ok) {
+                return formatDriveError(new Error(parsed.error));
+              }
+              ({ mimeType: sourceMime, essence } = parsed);
+            }
+
+            if (essence.startsWith('application/vnd.google-apps.')) {
+              return formatDriveError(new Error(
+                `mime_type "${sourceMime}" is a Google-native type, which describes the result of a conversion rather than ` +
+                `content you can upload. To convert a file you are uploading, pass its source type (e.g. ` +
+                `"application/vnd.openxmlformats-officedocument.presentationml.presentation") with convert_to_google_format=true. ` +
+                `${GOOGLE_NATIVE_CREATORS[essence] ?? 'This tool does not create Google-native files.'}`
+              ));
+            }
+            if (essence.startsWith('multipart/') || essence.startsWith('message/')) {
+              return formatDriveError(new Error(
+                `mime_type "${sourceMime}" declares a container format, which this tool does not upload. ` +
+                `Pass the type of the file itself.`
+              ));
+            }
+            if (encoding === 'text' && requiresBase64(essence)) {
+              return formatDriveError(new Error(
+                `'${essence}' is a binary format, so content_encoding must be "base64". ` +
+                `Uploading it as text would produce a corrupt file.`
+              ));
+            }
+
+            const decoded = decodeUploadContent(content, encoding, MAX_UPLOAD_SIZE);
+            if (!decoded.ok) {
+              return formatDriveError(new Error(decoded.error));
+            }
+
+            let targetMime = essence;
+            if (convert_to_google_format === true) {
+              const target = GOOGLE_CONVERSION_TARGETS[essence];
+              if (!target) {
+                return formatDriveError(new Error(
+                  `Cannot convert '${sourceMime}' to a Google-native format. Convertible source types are ` +
+                  `.pptx/.ppt/.odp (Slides), .docx/.doc/.odt/.rtf/.txt/.md/.html (Docs) and .xlsx/.xls/.ods/.csv/.tsv (Sheets). ` +
+                  `Retry without convert_to_google_format to store the file as-is.`
+                ));
+              }
+              targetMime = target;
+            }
+
+            const metadata: Record<string, unknown> = { name: fileName, mimeType: targetMime };
+            if (parent_folder_id) {
+              metadata.parents = [parent_folder_id];
+            }
+
+            const boundary = `gdrive-mcp-${randomUUID()}`;
+            // Text content is always serialized as UTF-8, so a caller charset is
+            // replaced rather than honoured and a missing one is not left to Drive to guess
+            const partMime = encoding === 'text' ? `${essence}; charset=UTF-8` : sourceMime;
+            const body = buildMultipartBody(metadata, partMime, decoded.bytes, boundary);
+
+            const result = await makeDriveRequest(
+              'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink',
+              accessToken,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': `multipart/related; boundary=${boundary}`,
+                },
+                // A view rather than Buffer: both reach undici intact, but Buffer
+                // does not satisfy the RequestInit body type
+                body: new Uint8Array(body.buffer, body.byteOffset, body.byteLength),
+              }
+            );
+
+            // The file exists by now, so a thin response must not read as a
+            // failed create: that would invite a retry that uploads it twice
+            if (!result || typeof result !== 'object' || typeof result.id !== 'string') {
+              return formatDriveError(new Error(
+                `'${fileName}' was uploaded but Drive returned no file id, so it could not be confirmed. ` +
+                `Search Drive for '${fileName}' before retrying, otherwise you may create a duplicate.`
+              ));
+            }
+
+            const size = result.size ? Number(result.size) : NaN;
+            const createdMime = result.mimeType ?? targetMime;
+            const output = {
+              id: result.id,
+              name: result.name ?? fileName,
+              mimeType: createdMime,
+              size: Number.isFinite(size) ? size : undefined,
+              createdTime: result.createdTime,
+              modifiedTime: result.modifiedTime,
+              parents: result.parents,
+              webViewLink: result.webViewLink,
+              message: targetMime !== essence
+                ? `File created and converted to ${createdMime}`
+                : 'File created successfully',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],

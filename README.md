@@ -33,6 +33,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 |                 | `share_file`    | user / domain / anyone permissions; no email by default.   |
 | Create / copy   | `create_folder` | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`     | Optional rename + destination folder; not for folders.     |
+| Upload          | `upload_file`   | Text or base64 content; optional convert to a Google type. |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
 results (metadata, IDs, search hits, text file bodies) return
@@ -58,7 +59,7 @@ Each tool declares the Google scope it needs (the first argument to
 | Scope            | Tools                                                |
 |------------------|------------------------------------------------------|
 | `drive.readonly` | `search_files`, `get_file`                           |
-| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file` |
+| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `upload_file` |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
@@ -108,7 +109,7 @@ curl -s -X POST http://localhost:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer fake-token" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
-# lists the tools the active profile registers (all 6 when PROFILE is unset)
+# lists the tools the active profile registers (all 7 when PROFILE is unset)
 ```
 
 A fake token returns a structured 401 from the Drive API (with a "reconnect
