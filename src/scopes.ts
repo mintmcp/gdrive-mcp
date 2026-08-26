@@ -12,7 +12,6 @@ export const SCOPES = {
 export const PROFILES: Record<string, readonly string[]> = {
   standard: [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
   "standard-labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
-  // labels.readonly is explicit here because full drive does not imply it
   full: [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
 };
 

@@ -759,6 +759,22 @@ export async function getFileLabels(
   };
 }
 
+/**
+ * Gate + fetch + _meta shape for get_file's label enrichment, in one owner.
+ * Label enrichment needs drive.labels.readonly, which frozen profiles like
+ * standard do not carry: null means the grant lacks it, so no label API calls
+ * are made and no _meta is attached. The promise never rejects
+ */
+function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
+  const granted = grantedScopes();
+  if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
+  return getFileLabels(fileId, accessToken).then(({ labels, error, skipped }) => ({
+    labels,
+    ...(error ? { labelsError: error } : {}),
+    ...(skipped ? { labelsSkipped: true } : {}),
+  }));
+}
+
 // Reusable output schema fragments — tolerant (all leaves optional, passthrough outer)
 const driveFileSchema = z.object({
   id: z.string().optional(),
@@ -1241,15 +1257,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
           const { accessToken } = context;
 
-          // Label enrichment needs drive.labels.readonly, which frozen profiles
-          // like standard do not carry. Deployments whose grant lacks it skip
-          // the label API calls entirely instead of paying a guaranteed 403
-          const granted = grantedScopes();
-          const labelsEnabled = granted === null || granted.has(SCOPES.DRIVE_LABELS_READONLY);
-
-          // Started before run() so it resolves in parallel with the metadata
-          // fetch; never rejects
-          const labelsPromise = labelsEnabled ? getFileLabels(file_id, accessToken) : null;
+          // Started before run() so labels resolve in parallel with the metadata fetch
+          const labelsMeta = fetchLabelsMeta(file_id, accessToken);
 
           const run = async () => {
             const meta = await makeDriveRequest(
@@ -1392,17 +1401,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           } catch (err) {
             result = formatDriveError(err);
           }
-          if (!labelsPromise) return result;
-
-          const { labels, error, skipped } = await labelsPromise;
-          return {
-            ...result,
-            _meta: {
-              labels,
-              ...(error ? { labelsError: error } : {}),
-              ...(skipped ? { labelsSkipped: true } : {}),
-            },
-          };
+          if (!labelsMeta) return result;
+          return { ...result, _meta: await labelsMeta };
         }),
       },
 
