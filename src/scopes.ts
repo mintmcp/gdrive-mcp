@@ -10,9 +10,9 @@ export const SCOPES = {
 // accept re-consent as it grows. Keep each profile matching the scopes its
 // brokered mcp-registry entry requests
 export const PROFILES: Record<string, readonly string[]> = {
-  standard: [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
+  "standard": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
   "standard-labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
-  full: [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
+  "full": [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
 };
 
 // Google's scope hierarchy, not our policy: full drive is a superset of the
