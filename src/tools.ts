@@ -699,6 +699,7 @@ export async function getFileLabels(
           });
         }
         if (values.length < field.text.length) skipped = true;
+        if (values.some((v) => v.length > MAX_TEXT_LABEL_CHARS)) skipped = true;
       } else if (field.valueType === 'selection' && field.selection?.length) {
         selections.push({ fieldId, choiceIds: field.selection });
       } else {

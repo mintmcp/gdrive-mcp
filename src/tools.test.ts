@@ -772,11 +772,12 @@ describe('getFileLabels', () => {
     expect(res.error).toBe('label read failed');
   });
 
-  it('caps text values so free-form fields cannot flood the result', async () => {
+  it('caps text values and flags the truncation as skipped', async () => {
     const applied = [{ id: 'lbl2', fields: { t: { valueType: 'text', text: ['x'.repeat(1000)] } } }];
     stubFetch([['listLabels', () => jsonResponse({ labels: applied })]]);
     const res = await getFileLabels('f1', 'tok');
     expect(res.labels[0].value).toHaveLength(256);
+    expect(res.skipped).toBe(true);
   });
 });
 
