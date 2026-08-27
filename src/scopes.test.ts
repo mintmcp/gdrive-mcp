@@ -96,8 +96,8 @@ describe("createServer tool surface", () => {
     expect(toolNames(grantedScopes("standard"))).toEqual(CORE_TOOLS);
   });
 
-  test("standard-labels-write registers the label write tools", () => {
-    expect(toolNames(grantedScopes("standard-labels-write")))
+  test("labels-write registers the label write tools", () => {
+    expect(toolNames(grantedScopes("labels-write")))
       .toEqual([...CORE_TOOLS, "remove_file_label", "set_file_label"].sort());
   });
 
