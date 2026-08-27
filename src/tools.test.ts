@@ -860,8 +860,8 @@ describe('get_file handler _meta', () => {
     expect(calls.some((u) => u.includes('listLabels'))).toBe(false);
   });
 
-  it('runs label enrichment under the standard-labels profile', async () => {
-    process.env.PROFILE = 'standard-labels';
+  it('runs label enrichment under the labels profile', async () => {
+    process.env.PROFILE = 'labels';
     stubFetch([
       metaRoute,
       labelsRoute,

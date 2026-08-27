@@ -23,7 +23,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
 - `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
-  the `standard-labels` and `full` profiles; enables `get_file`'s label
+  the `labels` and `full` profiles; enables `get_file`'s label
   enrichment (see [Drive label enrichment](#drive-label-enrichment))
 
 ## Tools
@@ -68,7 +68,7 @@ a connector's contract with its users:
 | Profile           | Scopes                                                    |
 |-------------------|-----------------------------------------------------------|
 | `standard`        | `drive.readonly` + `drive.file`                           |
-| `standard-labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
 | `full`            | `drive` + `drive.labels.readonly`                         |
 
 Each tool declares the Google scope it needs (the first argument to

@@ -11,7 +11,7 @@ export const SCOPES = {
 // brokered mcp-registry entry requests
 export const PROFILES: Record<string, readonly string[]> = {
   "standard": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
-  "standard-labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
+  "labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
   "full": [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
 };
 

@@ -14,4 +14,4 @@
 - app: gdrive-mintmcp-labels
   env: prod
   live: false
-  profile: standard-labels # standard + drive.labels.readonly
+  profile: labels # standard + drive.labels.readonly
