@@ -565,10 +565,9 @@ async function makeDriveRequest(
 // fieldId -> choiceId -> display name
 export type LabelSchema = Record<string, Record<string, string>>;
 
-// One label value, tagged by provenance: selection choices are admin-defined
-// taxonomy, text values are free form and writable by anyone with edit rights
-// on the file, and resolved=false means value is a raw choice id we could not
-// name. A policy gate must not treat the three alike
+// Tagged by provenance: selection choices are admin taxonomy, text is free
+// form (writable by anyone with edit rights), resolved=false is a raw choice
+// id we could not name. A gate must not treat the three alike
 export type LabelValue = {
   labelId: string;
   fieldId: string;
@@ -581,17 +580,15 @@ export type FileLabels = {
   labels: LabelValue[];
   // stable codes, never raw provider messages (those stay in logs)
   error?: 'label read failed' | 'incomplete label resolution';
-  // set when label fields exist that this connector does not render
-  // (date/integer/user, empty text), so labels: [] alone is not proof the
-  // file is unclassified
+  // label fields we do not render (date/integer/user, empty text) exist,
+  // so labels: [] alone is not proof the file is unclassified
   skipped?: boolean;
 };
 
 /**
- * Fetch the exact label revision the file references, so a later choice rename
- * can't retroactively change how an already-labeled file resolves. Never cached
- * across requests: each request carries a different user's token, and a schema
- * fetched with one user's authorization must not answer another user's request
+ * Fetch the exact revision the file references so a later choice rename can't
+ * change how an already-labeled file resolves. Never cached across requests:
+ * a schema fetched with one user's token must not answer another user's
  */
 export async function getLabelSchema(
   labelId: string,
@@ -629,11 +626,9 @@ export async function getLabelSchema(
 }
 
 /**
- * Surface the file's Drive label values for policy middleware, which reads them
- * from the tool result's _meta. The connector informs, never blocks: failures
- * come back as a stable error code alongside whatever was read, and the file
- * contents still return. A consumer gating access must treat error or skipped
- * as "classification unknown", never as unlabeled
+ * Label values for policy middleware, read from the result's _meta. Informs,
+ * never blocks: failures come back as a stable error code alongside whatever
+ * was read. error or skipped means "classification unknown", not unlabeled
  */
 export async function getFileLabels(
   fileId: string,
@@ -761,10 +756,9 @@ export async function getFileLabels(
 }
 
 /**
- * Gate + fetch + _meta shape for get_file's label enrichment, in one owner.
- * Label enrichment needs drive.labels.readonly, which frozen profiles like
- * standard do not carry: null means the grant lacks it, so no label API calls
- * are made and no _meta is attached. The promise never rejects
+ * Single owner of get_file's label enrichment: scope gate + fetch + _meta
+ * shape. null means the grant lacks drive.labels.readonly, so no label calls
+ * and no _meta. The promise never rejects
  */
 function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
   const granted = grantedScopes();
