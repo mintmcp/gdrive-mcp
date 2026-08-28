@@ -267,6 +267,11 @@ describe('buildFileUpdate', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/at least one field/i);
   });
+  it('trims surrounding whitespace off new_name', () => {
+    const r = buildFileUpdate({ new_name: '  report.pdf  ' });
+    expect(r.ok && r.body.name).toBe('report.pdf');
+  });
+
   it('rejects an empty or whitespace-only new_name', () => {
     expect(buildFileUpdate({ new_name: '' }).ok).toBe(false);
     expect(buildFileUpdate({ new_name: '   ' }).ok).toBe(false);

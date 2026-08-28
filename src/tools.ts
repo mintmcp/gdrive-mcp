@@ -342,7 +342,7 @@ export function buildFileUpdate(args: {
     if (typeof args.new_name !== 'string' || args.new_name.trim().length === 0) {
       return { ok: false, error: 'new_name must be a non-empty string when provided.' };
     }
-    body.name = args.new_name;
+    body.name = args.new_name.trim();
   }
   if (args.description !== undefined) {
     if (typeof args.description !== 'string') {
@@ -572,17 +572,16 @@ const driveFileSchema = z.object({
   trashed: z.boolean().optional(),
 }).passthrough();
 
-/**
- * Shared normaliser for a raw Drive file resource into the 11 base fields.
- * Extracted so the mapping is unit-testable in isolation and not duplicated
- * across search_files, list_recent_files and get_file_metadata.
- */
 // Kept in lockstep with formatDriveFile: this mask must request exactly the
 // fields formatDriveFile reads. search_files and list_recent_files share it so
-// adding a field is a one-place change.
+// adding a field is a one-place change
 const DRIVE_FILE_LIST_FIELDS =
   'nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,owners,trashed)';
 
+/**
+ * Shared normaliser for a raw Drive file resource, used by search_files,
+ * list_recent_files and get_file_metadata
+ */
 export function formatDriveFile(file: any) {
   return {
     id: file.id,
