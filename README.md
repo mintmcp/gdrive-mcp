@@ -63,8 +63,8 @@ Each tool declares the Google scope it needs (the first argument to
 
 | Scope            | Tools                                                |
 |------------------|------------------------------------------------------|
-| `drive.readonly` | `search_files`, `get_file`                           |
-| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `upload_file` |
+| `drive.readonly` | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
+| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file`, `trash_file`, `upload_file` |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
