@@ -34,7 +34,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 |                 | `get_file_permissions` | Lists who has access and at what role.                     |
 | Move / share    | `move_file`            | True move; removes the item from its previous parents.     |
 |                 | `share_file`           | user / domain / anyone permissions; no email by default.   |
-|                 | `update_file`          | Rename / set description / star; metadata only.            |
+|                 | `update_file_metadata` | Rename / set description / star; metadata only.            |
 |                 | `trash_file`           | Reversible move to trash (not a permanent delete).         |
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
@@ -64,7 +64,7 @@ Each tool declares the Google scope it needs (the first argument to
 | Scope            | Tools                                                |
 |------------------|------------------------------------------------------|
 | `drive.readonly` | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
-| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file`, `trash_file`, `upload_file` |
+| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is

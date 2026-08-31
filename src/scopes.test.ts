@@ -71,7 +71,7 @@ const ALL_TOOLS = [
   "search_files",
   "share_file",
   "trash_file",
-  "update_file",
+  "update_file_metadata",
   "upload_file",
 ].sort();
 

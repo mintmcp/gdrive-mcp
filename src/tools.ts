@@ -324,7 +324,7 @@ export function buildMultipartBody(
 }
 
 /**
- * Build the PATCH body for update_file from the optional metadata fields.
+ * Build the PATCH body for update_file_metadata from the optional metadata fields.
  * Returns a discriminated result so the handler can reject a no-op update
  * before the round-trip — Drive accepts an empty PATCH, but an update with
  * nothing to change is almost always a caller mistake. The zod schema already
@@ -1581,7 +1581,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         }),
       },
 
-      update_file: {
+      update_file_metadata: {
         description: 'Update the metadata of a Google Drive file or folder: rename it (new_name), set its description, or star/unstar it. Provide at least one field to change; omitted fields are left untouched. Use this for metadata edits only — to move an item use move_file, to change sharing use share_file, and to trash it use trash_file.',
         outputSchema: {
           id: z.string(),
