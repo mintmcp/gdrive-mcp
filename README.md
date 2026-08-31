@@ -54,11 +54,16 @@ reason, and a corrective hint.
 ## Drive label enrichment
 
 On deployments whose grant includes `drive.labels.readonly`, `get_file`
-surfaces the file's applied Drive labels on the tool result's `_meta.labels`
-as `{labelId, fieldId, valueType, value, resolved}` entries. Without the
-scope, the label API calls are skipped entirely and no `_meta` is returned.
-`_meta.labelsError` flags a failed read or resolution; `_meta.labelsSkipped`
-flags label fields the connector does not render.
+surfaces the file's applied Drive labels on the tool result's
+`_meta.applied`: one entry per applied label, `{labelId, revisionId, title,
+resolved, values}`, where `values` carries the label's field values
+(`selection` with both `choiceId` and `displayName`, plus `text`, `date`,
+`integer`; person fields are withheld and flagged via `skippedValueTypes`).
+Title-only badge labels appear with a resolved `title` and empty `values`.
+Policy should match ids (labelId/fieldId/choiceId); titles and display names
+are human overlays. `_meta.labelsError` flags a failed read or resolution.
+Without the scope, the label API calls are skipped entirely and no `_meta`
+is returned; absence means "surfacing not enabled", never "no labels".
 
 ## Profiles
 

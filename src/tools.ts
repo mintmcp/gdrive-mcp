@@ -563,38 +563,50 @@ async function makeDriveRequest(
 }
 
 // fieldId -> choiceId -> display name
-export type LabelSchema = Record<string, Record<string, string>>;
+export type LabelChoices = Record<string, Record<string, string>>;
 
-// Tagged by provenance: selection choices are admin taxonomy, text is free
-// form (writable by anyone with edit rights), resolved=false is a raw choice
-// id we could not name. A gate must not treat the three alike
-export type LabelValue = {
+// One value inside an applied label. Selection carries both the stable policy
+// key (choiceId) and the human overlay (displayName); text is free form and
+// writable by anyone with edit rights, a gate must not trust it like taxonomy
+export type AppliedLabelValue =
+  | { fieldId: string; valueType: 'selection'; choiceId: string; displayName?: string; resolved: boolean }
+  | { fieldId: string; valueType: 'text'; value: string }
+  | { fieldId: string; valueType: 'date'; value: string }
+  | { fieldId: string; valueType: 'integer'; value: string };
+
+// user fields stay unsurfaced (PII, weak classification signal); the other
+// codes mark values withheld or altered, so empty values never silently
+// masquerades as unclassified
+export type SkippedValueType = 'user' | 'emptyText' | 'truncatedText' | 'unsupported';
+
+export type AppliedLabel = {
   labelId: string;
-  fieldId: string;
-  valueType: 'selection' | 'text';
-  value: string;
+  revisionId?: string;
+  // the label's display name, the whole story for title-only badge labels
+  title?: string;
+  // this label's labels.get lookup succeeded (title and choice names trusted)
   resolved: boolean;
+  values: AppliedLabelValue[];
+  skippedValueTypes?: SkippedValueType[];
 };
 
 export type FileLabels = {
-  labels: LabelValue[];
+  applied: AppliedLabel[];
   // stable codes, never raw provider messages (those stay in logs)
   error?: 'label read failed' | 'incomplete label resolution';
-  // label fields we do not render (date/integer/user, empty text) exist,
-  // so labels: [] alone is not proof the file is unclassified
-  skipped?: boolean;
 };
 
 /**
- * Fetch the exact revision the file references so a later choice rename can't
- * change how an already-labeled file resolves. Never cached across requests:
- * a schema fetched with one user's token must not answer another user's
+ * Fetch a label's title and choice names at the exact revision the file
+ * references, so a later rename can't change how an already-labeled file
+ * resolves. Never cached across requests: a lookup made with one user's
+ * token must not answer another user's
  */
-export async function getLabelSchema(
+export async function getLabelInfo(
   labelId: string,
   revisionId: string | undefined,
   accessToken: string
-): Promise<LabelSchema> {
+): Promise<{ title?: string; choices: LabelChoices }> {
   const labelResource = revisionId
     ? `${encodeURIComponent(labelId)}@${encodeURIComponent(revisionId)}`
     : encodeURIComponent(labelId);
@@ -603,47 +615,53 @@ export async function getLabelSchema(
     `${DRIVE_LABELS_API}/labels/${labelResource}?view=LABEL_VIEW_FULL`,
     accessToken
   ) as {
+    properties?: { title?: string };
     fields?: Array<{
       id: string;
       selectionOptions?: { choices?: Array<{ id: string; properties?: { displayName?: string } }> };
     }>;
   };
 
-  const schema: LabelSchema = {};
+  const choices: LabelChoices = {};
   for (const field of data?.fields || []) {
-    const choices = field.selectionOptions?.choices;
-    if (!choices) continue;
-    const choiceNames: Record<string, string> = {};
-    for (const choice of choices) {
+    const fieldChoices = field.selectionOptions?.choices;
+    if (!fieldChoices) continue;
+    const names: Record<string, string> = {};
+    for (const choice of fieldChoices) {
       if (choice.properties?.displayName) {
-        choiceNames[choice.id] = choice.properties.displayName;
+        names[choice.id] = choice.properties.displayName;
       }
     }
-    schema[field.id] = choiceNames;
+    choices[field.id] = names;
   }
 
-  return schema;
+  return { title: data?.properties?.title, choices };
 }
 
 /**
- * Label values for policy middleware, read from the result's _meta. Informs,
- * never blocks: failures come back as a stable error code alongside whatever
- * was read. error or skipped means "classification unknown", not unlabeled
+ * The file's applied Drive labels for policy middleware, read from the tool
+ * result's _meta. Informs, never blocks: failures come back as a stable error
+ * code alongside whatever was read. Policy should match ids (labelId, fieldId,
+ * choiceId); titles and display names are overlays for humans
  */
 export async function getFileLabels(
   fileId: string,
   accessToken: string
 ): Promise<FileLabels> {
-  type AppliedLabel = {
+  type WireLabel = {
     id?: string;
     revisionId?: string;
-    fields?: Record<string, { valueType?: string; selection?: string[]; text?: string[] }>;
+    fields?: Record<string, {
+      valueType?: string;
+      selection?: string[];
+      text?: string[];
+      dateString?: string[];
+      integer?: string[];
+    }>;
   };
 
-  const applied: AppliedLabel[] = [];
-  const labels: LabelValue[] = [];
+  const wire: WireLabel[] = [];
   let error: FileLabels['error'];
-  let skipped = false;
 
   // A mid-pagination failure keeps the labels already read and flags the
   // error rather than discarding everything
@@ -655,8 +673,8 @@ export async function getFileLabels(
       const pageData = await makeDriveRequest(
         `/files/${encodeURIComponent(fileId)}/listLabels?${params}`,
         accessToken
-      ) as { labels?: AppliedLabel[]; nextPageToken?: string };
-      if (pageData?.labels) applied.push(...pageData.labels);
+      ) as { labels?: WireLabel[]; nextPageToken?: string };
+      if (pageData?.labels) wire.push(...pageData.labels);
       pageToken = pageData?.nextPageToken;
       if (!pageToken) break;
     }
@@ -669,104 +687,105 @@ export async function getFileLabels(
     console.warn(`getFileLabels: label read failed fileId=${fileId} error=${err?.message}`);
   }
 
-  const toResolve: Array<{
-    labelId: string;
-    revisionId?: string;
-    selections: Array<{ fieldId: string; choiceIds: string[] }>;
-  }> = [];
-
-  for (const label of applied) {
-    if (!label.id) {
-      skipped = true;
-      continue;
-    }
-    const selections: Array<{ fieldId: string; choiceIds: string[] }> = [];
-    for (const [fieldId, field] of Object.entries(label.fields || {})) {
-      if (field.valueType === 'text' && field.text) {
-        const values = field.text.filter(Boolean);
-        for (const value of values) {
-          labels.push({
-            labelId: label.id,
-            fieldId,
-            valueType: 'text',
-            value: value.slice(0, MAX_TEXT_LABEL_CHARS),
-            resolved: true,
-          });
-        }
-        if (values.length < field.text.length) skipped = true;
-        if (values.some((v) => v.length > MAX_TEXT_LABEL_CHARS)) skipped = true;
-      } else if (field.valueType === 'selection' && field.selection?.length) {
-        selections.push({ fieldId, choiceIds: field.selection });
-      } else {
-        skipped = true;
-      }
-    }
-    if (selections.length > 0) {
-      toResolve.push({ labelId: label.id, revisionId: label.revisionId, selections });
-    }
-  }
-
-  // A failure on one label never discards values collected from the others
-  const schemas = await Promise.allSettled(
-    toResolve.map((l) => getLabelSchema(l.labelId, l.revisionId, accessToken))
-  );
-
-  toResolve.forEach((l, i) => {
-    const settled = schemas[i];
-    const schema = settled.status === 'fulfilled' ? settled.value : undefined;
-    if (!schema) {
-      if (!error) error = 'incomplete label resolution';
-      console.warn(
-        `getFileLabels: label resolve failed fileId=${fileId} labelId=${l.labelId} error=${(settled as PromiseRejectedResult).reason?.message}`
-      );
-    }
-    let unresolved = false;
-    for (const { fieldId, choiceIds } of l.selections) {
-      for (const choiceId of choiceIds) {
-        const name = schema?.[fieldId]?.[choiceId];
-        labels.push({
-          labelId: l.labelId,
-          fieldId,
-          valueType: 'selection',
-          value: name ?? choiceId,
-          resolved: name !== undefined,
-        });
-        if (name === undefined) unresolved = true;
-      }
-    }
-    if (unresolved && schema) {
-      if (!error) error = 'incomplete label resolution';
-      console.warn(`getFileLabels: unresolved choice fileId=${fileId} labelId=${l.labelId}`);
-    }
+  const withIds = wire.filter((l): l is WireLabel & { id: string } => {
+    if (l.id) return true;
+    if (!error) error = 'incomplete label resolution';
+    console.warn(`getFileLabels: applied label without id fileId=${fileId}`);
+    return false;
   });
 
-  const seen = new Set<string>();
-  const deduped = labels.filter((l) => {
-    const key = `${l.labelId}\u0000${l.fieldId}\u0000${l.valueType}\u0000${l.value}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  // One labels.get per applied label, in parallel: it carries the title
+  // (the whole classification for badge labels) and the choice names. A
+  // failure on one label never discards the others
+  const lookups = await Promise.allSettled(
+    withIds.map((l) => getLabelInfo(l.id, l.revisionId, accessToken))
+  );
+
+  const applied: AppliedLabel[] = withIds.map((label, i) => {
+    const lookup = lookups[i];
+    const info = lookup.status === 'fulfilled' ? lookup.value : undefined;
+    if (!info) {
+      if (!error) error = 'incomplete label resolution';
+      console.warn(
+        `getFileLabels: label lookup failed fileId=${fileId} labelId=${label.id} ` +
+        `error=${(lookup as PromiseRejectedResult).reason?.message}`
+      );
+    }
+
+    const values: AppliedLabelValue[] = [];
+    const skippedTypes = new Set<SkippedValueType>();
+    let unresolvedChoice = false;
+
+    for (const [fieldId, field] of Object.entries(label.fields || {})) {
+      if (field.valueType === 'text' && field.text) {
+        for (const raw of field.text) {
+          if (!raw) {
+            skippedTypes.add('emptyText');
+            continue;
+          }
+          if (raw.length > MAX_TEXT_LABEL_CHARS) skippedTypes.add('truncatedText');
+          values.push({ fieldId, valueType: 'text', value: raw.slice(0, MAX_TEXT_LABEL_CHARS) });
+        }
+      } else if (field.valueType === 'dateString' && field.dateString?.length) {
+        for (const value of field.dateString) {
+          values.push({ fieldId, valueType: 'date', value });
+        }
+      } else if (field.valueType === 'integer' && field.integer?.length) {
+        for (const value of field.integer) {
+          values.push({ fieldId, valueType: 'integer', value: String(value) });
+        }
+      } else if (field.valueType === 'selection' && field.selection?.length) {
+        for (const choiceId of field.selection) {
+          const displayName = info?.choices[fieldId]?.[choiceId];
+          if (info && displayName === undefined) unresolvedChoice = true;
+          values.push({
+            fieldId,
+            valueType: 'selection',
+            choiceId,
+            ...(displayName !== undefined ? { displayName } : {}),
+            resolved: displayName !== undefined,
+          });
+        }
+      } else if (field.valueType === 'user') {
+        skippedTypes.add('user');
+      } else {
+        skippedTypes.add('unsupported');
+      }
+    }
+
+    if (unresolvedChoice) {
+      if (!error) error = 'incomplete label resolution';
+      console.warn(`getFileLabels: unresolved choice fileId=${fileId} labelId=${label.id}`);
+    }
+
+    return {
+      labelId: label.id,
+      ...(label.revisionId ? { revisionId: label.revisionId } : {}),
+      ...(info?.title !== undefined ? { title: info.title } : {}),
+      resolved: info !== undefined,
+      values,
+      ...(skippedTypes.size ? { skippedValueTypes: [...skippedTypes] } : {}),
+    };
   });
 
   return {
-    labels: deduped,
+    applied,
     ...(error ? { error } : {}),
-    ...(skipped ? { skipped: true } : {}),
   };
 }
 
 /**
  * Single owner of get_file's label enrichment: scope gate + fetch + _meta
  * shape. null means the grant lacks drive.labels.readonly, so no label calls
- * and no _meta. The promise never rejects
+ * and no _meta; by contract that reads "surfacing not enabled", never
+ * "file has no labels". The promise never rejects
  */
 function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
   const granted = grantedScopes();
   if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
-  return getFileLabels(fileId, accessToken).then(({ labels, error, skipped }) => ({
-    labels,
+  return getFileLabels(fileId, accessToken).then(({ applied, error }) => ({
+    applied,
     ...(error ? { labelsError: error } : {}),
-    ...(skipped ? { labelsSkipped: true } : {}),
   }));
 }
 
