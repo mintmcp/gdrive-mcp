@@ -64,9 +64,14 @@ const ALL_TOOLS = [
   "copy_file",
   "create_folder",
   "get_file",
+  "get_file_metadata",
+  "get_file_permissions",
+  "list_recent_files",
   "move_file",
   "search_files",
   "share_file",
+  "trash_file",
+  "update_file_metadata",
   "upload_file",
 ].sort();
 
@@ -91,7 +96,13 @@ describe("createServer tool surface", () => {
   });
 
   test("a read-only grant withholds every write tool", () => {
-    expect(toolNames(expandScopes([SCOPES.DRIVE_READONLY]))).toEqual(["get_file", "search_files"]);
+    expect(toolNames(expandScopes([SCOPES.DRIVE_READONLY]))).toEqual([
+      "get_file",
+      "get_file_metadata",
+      "get_file_permissions",
+      "list_recent_files",
+      "search_files",
+    ]);
   });
 
   test("a grant covering nothing registers nothing", () => {
