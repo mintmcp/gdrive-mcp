@@ -582,7 +582,7 @@ export type SkippedValueType = 'user' | 'emptyText' | 'truncatedText' | 'unsuppo
 export type AppliedLabel = {
   labelId: string;
   revisionId?: string;
-  // the label's display name, the whole story for title-only badge labels
+  // the whole story for title-only badge labels
   title?: string;
   // this label's labels.get lookup succeeded (title and choice names trusted)
   resolved: boolean;
@@ -694,9 +694,9 @@ export async function getFileLabels(
     return false;
   });
 
-  // One labels.get per applied label, in parallel: it carries the title
-  // (the whole classification for badge labels) and the choice names. A
-  // failure on one label never discards the others
+  // labels.get carries the title (the whole classification for badge
+  // labels), so every applied label gets a lookup, not just selection
+  // ones. A failure on one label never discards the others
   const lookups = await Promise.allSettled(
     withIds.map((l) => getLabelInfo(l.id, l.revisionId, accessToken))
   );
@@ -1628,12 +1628,24 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           lastModifyingUser: z.string().optional(),
           iconLink: z.string().optional(),
           thumbnailLink: z.string().optional(),
+          labels: z.array(
+            z.object({
+              labelId: z.string().optional(),
+              title: z.string().optional(),
+              resolved: z.boolean().optional(),
+            }).passthrough()
+          ).optional().describe('The file\'s applied Drive labels (classification)'),
+          labelsError: z.string().optional(),
         },
         schema: {
           file_id: z.string().describe('The Google Drive file or folder ID (from search_files).'),
         },
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id }: any, context: any) => {
           const { accessToken } = context;
+
+          // Labels are metadata, so unlike get_file this tool also returns
+          // them in the visible body; _meta stays the uniform policy channel
+          const labelsMeta = fetchLabelsMeta(file_id, accessToken);
 
           try {
             const fields = [
@@ -1648,7 +1660,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               accessToken,
             );
 
-            const output = {
+            const output: Record<string, unknown> = {
               ...formatDriveFile(meta),
               starred: meta.starred === true,
               shared: meta.shared === true,
@@ -1660,12 +1672,23 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               iconLink: meta.iconLink,
               thumbnailLink: meta.thumbnailLink,
             };
+            if (!labelsMeta) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+                structuredContent: output,
+              };
+            }
+            const labels = await labelsMeta;
+            output.labels = labels.applied;
+            if (labels.labelsError) output.labelsError = labels.labelsError;
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,
+              _meta: labels,
             };
           } catch (err) {
-            return formatDriveError(err);
+            const e = formatDriveError(err);
+            return labelsMeta ? { ...e, _meta: await labelsMeta } : e;
           }
         }),
       },

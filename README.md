@@ -60,6 +60,9 @@ resolved, values}`, where `values` carries the label's field values
 (`selection` with both `choiceId` and `displayName`, plus `text`, `date`,
 `integer`; person fields are withheld and flagged via `skippedValueTypes`).
 Title-only badge labels appear with a resolved `title` and empty `values`.
+`get_file_metadata` additionally returns the same `applied` tree in its
+visible result as `labels` (labels are metadata, agents can answer
+classification questions from it); `get_file` keeps labels in `_meta` only.
 Policy should match ids (labelId/fieldId/choiceId); titles and display names
 are human overlays. `_meta.labelsError` flags a failed read or resolution.
 Without the scope, the label API calls are skipped entirely and no `_meta`

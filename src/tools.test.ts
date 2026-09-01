@@ -530,7 +530,7 @@ describe('decodeUploadContent on large payloads', () => {
 
 
 // ---------------------------------------------------------------------------
-// Drive Labels: getLabelSchema / getFileLabels
+// Drive Labels: getLabelInfo / getFileLabels
 // ---------------------------------------------------------------------------
 
 /**
@@ -873,6 +873,35 @@ describe('get_file handler _meta', () => {
     expect(res._meta).toBeUndefined();
     expect(calls.some((c) => c.url.includes('listLabels'))).toBe(false);
   });
+
+  it('get_file_metadata returns labels in the visible body and in _meta', async () => {
+    stubFetch([
+      ['md5Checksum', () => jsonResponse(FILE_META)],
+      labelsRoute,
+      labelInfoRoute,
+    ]);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.labels).toEqual([{
+      labelId: 'lbl2', title: 'Notes', resolved: true,
+      values: [{ fieldId: 't', valueType: 'text', value: 'Internal' }],
+    }]);
+    expect(res._meta.applied).toHaveLength(1);
+    expect(JSON.parse(res.content[0].text).labels).toHaveLength(1);
+  });
+
+  it('get_file_metadata omits labels entirely when the profile lacks the scope', async () => {
+    process.env.PROFILE = 'standard';
+    const calls = stubFetch([['md5Checksum', () => jsonResponse(FILE_META)]]);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.labels).toBeUndefined();
+    expect(res._meta).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('listLabels'))).toBe(false);
+  });
+
 
   it('runs label enrichment under the labels profile', async () => {
     process.env.PROFILE = 'labels';
