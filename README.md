@@ -22,6 +22,9 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/userinfo.profile`
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
+- `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
+  the `labels` and `full` profiles; enables `get_file`'s label
+  enrichment (see [Drive label enrichment](#drive-label-enrichment))
 
 ## Tools
 
@@ -48,23 +51,42 @@ results (metadata, IDs, search hits, text file bodies) return
 payload). Errors route through a single envelope with HTTP status,
 reason, and a corrective hint.
 
+## Drive label enrichment
+
+On deployments whose grant includes `drive.labels.readonly`, `get_file`
+surfaces the file's applied Drive labels on the tool result's
+`_meta.applied`: one entry per applied label, `{labelId, revisionId, title,
+resolved, values}`, where `values` carries the label's field values
+(`selection` with both `choiceId` and `displayName`, plus `text`, `date`,
+`integer`; person fields are withheld and flagged via `skippedValueTypes`).
+Title-only badge labels appear with a resolved `title` and empty `values`.
+`get_file_metadata` additionally returns the same `applied` tree in its
+visible result as `labels` (labels are metadata, agents can answer
+classification questions from it); `get_file` keeps labels in `_meta` only.
+Policy should match ids (labelId/fieldId/choiceId); titles and display names
+are human overlays. `_meta.labelsError` flags a failed read or resolution.
+Without the scope, the label API calls are skipped entirely and no `_meta`
+is returned; absence means "surfacing not enabled", never "no labels".
+
 ## Profiles
 
 A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
 a connector's contract with its users:
 
-| Profile    | Scopes                          |
-|------------|---------------------------------|
-| `standard` | `drive.readonly` + `drive.file` |
-| `full`     | `drive`                         |
+| Profile           | Scopes                                                    |
+|-------------------|-----------------------------------------------------------|
+| `standard`        | `drive.readonly` + `drive.file`                           |
+| `labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `full`            | `drive` + `drive.labels.readonly`                         |
 
 Each tool declares the Google scope it needs (the first argument to
 `requirePermissionSecure` in `src/tools.ts`):
 
-| Scope            | Tools                                                |
-|------------------|------------------------------------------------------|
-| `drive.readonly` | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
-| `drive.file`     | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
+| Scope                   | Tools                                                   |
+|-------------------------|---------------------------------------------------------|
+| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
+| `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
+| `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
@@ -155,3 +177,15 @@ npx @mintmcp/hosted-cli build-and-push --dockerfile Dockerfile --context .
 Then set `PROFILE` in the connector's env settings to the profile whose
 scopes the connector's OAuth grant requests, or leave it unset to register
 every tool.
+
+## Build the image locally
+
+Build the image straight from the repo's `Dockerfile` (from source, on the
+current branch) instead of pulling a published tag — handy for testing a
+branch or verifying a build. Build for `linux/amd64` to match the MintMCP
+runtime (required on Apple Silicon):
+
+```bash
+docker build --platform linux/amd64 -t gdrive-mcp:local .
+docker run --rm -p 8000:8000 gdrive-mcp:local
+```

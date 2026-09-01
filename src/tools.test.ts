@@ -1,14 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   classifyMime,
   escapeDriveQValue,
   isSelfMove,
   validateWorkspaceDomain,
-  parseRetryAfter,
-  backoffDelayMs,
-  isRetryable,
-  formatDriveError,
-  DriveApiError,
   unsupportedMessage,
   inferMimeTypeFromName,
   decodeUploadContent,
@@ -17,7 +12,10 @@ import {
   requiresBase64,
   buildFileUpdate,
   formatDriveFile,
+  GoogleDriveTools,
 } from './tools.js';
+import { requestContext } from './auth.js';
+import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
   it('escapes apostrophes', () => {
@@ -172,78 +170,6 @@ describe('validateWorkspaceDomain', () => {
     expect(validateWorkspaceDomain('..').ok).toBe(false);
     expect(validateWorkspaceDomain('-leading.com').ok).toBe(false);
     expect(validateWorkspaceDomain('trailing-.com').ok).toBe(false);
-  });
-});
-
-describe('parseRetryAfter', () => {
-  it('parses numeric seconds', () => {
-    expect(parseRetryAfter('5')).toBe(5000);
-  });
-  it('returns undefined for null / garbage', () => {
-    expect(parseRetryAfter(null)).toBeUndefined();
-    expect(parseRetryAfter('not-a-number-or-date')).toBeUndefined();
-  });
-  it('caps numeric values at MAX_RETRY_AFTER_MS', () => {
-    expect(parseRetryAfter('9999')).toBeLessThanOrEqual(30_000);
-  });
-  it('handles an HTTP-date in the past as 0', () => {
-    expect(parseRetryAfter('Mon, 01 Jan 2000 00:00:00 GMT')).toBe(0);
-  });
-});
-
-describe('backoffDelayMs', () => {
-  it('produces non-negative delays', () => {
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      expect(backoffDelayMs(attempt)).toBeGreaterThanOrEqual(0);
-    }
-  });
-  it('does not exceed the configured ceiling even for huge attempts', () => {
-    expect(backoffDelayMs(99)).toBeLessThanOrEqual(4000 * 1.25 + 1);
-  });
-});
-
-describe('isRetryable', () => {
-  it('retries 429 regardless of method', () => {
-    expect(isRetryable(429, 'GET')).toBe(true);
-    expect(isRetryable(429, 'POST')).toBe(true);
-  });
-  it('retries 5xx only for safe methods', () => {
-    expect(isRetryable(503, 'GET')).toBe(true);
-    expect(isRetryable(503, 'POST')).toBe(false);
-    expect(isRetryable(502, 'HEAD')).toBe(true);
-    expect(isRetryable(500, 'PATCH')).toBe(false);
-  });
-  it('never retries client errors', () => {
-    expect(isRetryable(400, 'GET')).toBe(false);
-    expect(isRetryable(404, 'GET')).toBe(false);
-  });
-});
-
-describe('formatDriveError', () => {
-  const payloadOf = (e: any) => JSON.parse(e.content[0].text);
-
-  it('emits 401 with reconnect hint', () => {
-    const e = formatDriveError(new DriveApiError('unauthorized', 401));
-    expect(e.isError).toBe(true);
-    expect(payloadOf(e).status).toBe(401);
-    expect(payloadOf(e).hint).toMatch(/reconnect/i);
-  });
-  it('emits 404 with not-found hint', () => {
-    const e = formatDriveError(new DriveApiError('not found', 404));
-    expect(payloadOf(e).status).toBe(404);
-    expect(payloadOf(e).hint).toMatch(/not found/i);
-  });
-  it('emits 429 with retry hint', () => {
-    const e = formatDriveError(new DriveApiError('too many', 429));
-    expect(payloadOf(e).hint).toMatch(/Retried/i);
-  });
-  it('preserves message for plain Error without status', () => {
-    const e = formatDriveError(new Error('boom'));
-    expect(payloadOf(e).error).toBe('boom');
-    expect(payloadOf(e).status).toBeUndefined();
-  });
-  it('omits structuredContent, which a client would validate against outputSchema', () => {
-    expect('structuredContent' in formatDriveError(new Error('boom'))).toBe(false);
   });
 });
 
@@ -521,6 +447,132 @@ describe('decodeUploadContent on large payloads', () => {
     const r = decodeUploadContent(42 as any, 'text', limit);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain('must be a string');
+  });
+});
+
+
+describe('get_file handler _meta', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.PROFILE;
+  });
+
+  const getFile = (GoogleDriveTools.getTools() as any).get_file.handler;
+  const callGetFile = (fileId: string) =>
+    requestContext.run({ accessToken: 'tok' }, () => getFile({ file_id: fileId }));
+
+  const FILE_META = { id: 'f1', name: 'a.txt', mimeType: 'text/plain', size: '5', webViewLink: 'https://x' };
+  const metaRoute: [string, (url: string) => Response] = [
+    'fields=id,name,mimeType,size,webViewLink', () => jsonResponse(FILE_META),
+  ];
+  const labelsRoute: [string, (url: string) => Response] = [
+    'listLabels', () => jsonResponse({ labels: [{ id: 'lbl2', fields: { t: { valueType: 'text', text: ['Internal'] } } }] }),
+  ];
+  const labelInfoRoute: [string, (url: string) => Response] = [
+    'drivelabels.googleapis.com', () => jsonResponse({ properties: { title: 'Notes' } }),
+  ];
+
+  it('attaches _meta.applied on a successful text read', async () => {
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      labelInfoRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res._meta.applied).toEqual([{
+      labelId: 'lbl2', title: 'Notes', resolved: true,
+      values: [{ fieldId: 't', valueType: 'text', value: 'Internal' }],
+    }]);
+    expect(res.structuredContent.labels).toBeUndefined();
+  });
+
+  it('attaches _meta.applied on a download-failure error envelope', async () => {
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      labelInfoRoute,
+      ['alt=media', () => new Response('forbidden', { status: 403 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.applied).toHaveLength(1);
+  });
+
+  it('attaches _meta.applied even when the metadata fetch itself fails', async () => {
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({ error: { message: 'not found' } }, 404)],
+      labelsRoute,
+      labelInfoRoute,
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.applied).toHaveLength(1);
+  });
+
+  it('attaches _meta.applied on the unsupported-mime error envelope', async () => {
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({ ...FILE_META, mimeType: 'application/zip' })],
+      labelsRoute,
+      labelInfoRoute,
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBe(true);
+    expect(res._meta.applied).toHaveLength(1);
+  });
+
+  it('skips label calls and omits _meta when the profile lacks the labels scope', async () => {
+    process.env.PROFILE = 'standard';
+    const calls = stubFetch([
+      metaRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res._meta).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('listLabels'))).toBe(false);
+  });
+
+  it('get_file_metadata returns labels in the visible body and in _meta', async () => {
+    stubFetch([
+      ['md5Checksum', () => jsonResponse(FILE_META)],
+      labelsRoute,
+      labelInfoRoute,
+    ]);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.labels).toEqual([{
+      labelId: 'lbl2', title: 'Notes', resolved: true,
+      values: [{ fieldId: 't', valueType: 'text', value: 'Internal' }],
+    }]);
+    expect(res._meta.applied).toHaveLength(1);
+    expect(JSON.parse(res.content[0].text).labels).toHaveLength(1);
+  });
+
+  it('get_file_metadata omits labels entirely when the profile lacks the scope', async () => {
+    process.env.PROFILE = 'standard';
+    const calls = stubFetch([['md5Checksum', () => jsonResponse(FILE_META)]]);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.labels).toBeUndefined();
+    expect(res._meta).toBeUndefined();
+    expect(calls.some((c) => c.url.includes('listLabels'))).toBe(false);
+  });
+
+
+  it('runs label enrichment under the labels profile', async () => {
+    process.env.PROFILE = 'labels';
+    stubFetch([
+      metaRoute,
+      labelsRoute,
+      labelInfoRoute,
+      ['alt=media', () => new Response('hello', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res._meta.applied).toHaveLength(1);
   });
 });
 
