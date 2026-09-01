@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
-import { DriveApiError, formatDriveError, parseRetryAfter, backoffDelayMs, isRetryable, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
+import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
