@@ -4,11 +4,6 @@ import {
   escapeDriveQValue,
   isSelfMove,
   validateWorkspaceDomain,
-  parseRetryAfter,
-  backoffDelayMs,
-  isRetryable,
-  formatDriveError,
-  DriveApiError,
   unsupportedMessage,
   inferMimeTypeFromName,
   decodeUploadContent,
@@ -17,10 +12,19 @@ import {
   requiresBase64,
   buildFileUpdate,
   formatDriveFile,
-  getLabelInfo,
-  getFileLabels,
   GoogleDriveTools,
 } from './tools.js';
+import {
+  parseRetryAfter,
+  backoffDelayMs,
+  isRetryable,
+  formatDriveError,
+  DriveApiError,
+} from './driveApi.js';
+import {
+  getLabelInfo,
+  getFileLabels,
+} from './labels.js';
 import { requestContext } from './auth.js';
 
 describe('escapeDriveQValue', () => {
@@ -529,14 +533,7 @@ describe('decodeUploadContent on large payloads', () => {
 });
 
 
-// ---------------------------------------------------------------------------
-// Drive Labels: getLabelInfo / getFileLabels
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal fetch stub: routes by substring match on the URL, in order.
- * Each route's handler returns a Response; unmatched URLs fail the test.
- */
+// fetch stub routing by URL substring, in order; unmatched URLs fail the test
 function stubFetch(routes: Array<[string, (url: string) => Response]>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   vi.stubGlobal('fetch', vi.fn(async (input: any, init?: RequestInit) => {
@@ -786,10 +783,6 @@ describe('getFileLabels', () => {
     expect(res.error).toBe('label read failed');
   });
 });
-
-// ---------------------------------------------------------------------------
-// get_file handler: the _meta contract
-// ---------------------------------------------------------------------------
 
 describe('get_file handler _meta', () => {
   afterEach(() => {
