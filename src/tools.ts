@@ -967,9 +967,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               // Node ≥22 is declared in package.json; Buffer is safe and avoids
               // the O(n²) String.fromCharCode chunking required by btoa.
               const base64Data = Buffer.from(arrayBuffer).toString('base64');
-              // The SDK rejects results that declare an outputSchema but omit
-              // structuredContent, so the binary path returns the metadata
-              // envelope there and keeps the bytes in the content blocks
               const imageMeta = { ...fileMeta, extraction: 'image' as const };
               return {
                 content: [
