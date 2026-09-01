@@ -63,9 +63,6 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
   if (reason) payload.reason = reason;
   if (hint) payload.hint = hint;
 
-  // No structuredContent: clients validate it against outputSchema even on an
-  // error result, and an error shape can never satisfy a success schema, so
-  // attaching it replaces every message below with an opaque -32602
   return {
     content: [{ type: 'text', text: JSON.stringify(payload) }],
     isError: true,
