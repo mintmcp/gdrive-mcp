@@ -77,7 +77,8 @@ is returned; absence means "surfacing not enabled", never "no labels".
 
 `set_file_label` / `remove_file_label` are generic wrappers over Drive
 `files.modifyLabels`, registered only when the grant includes
-`drive.metadata`. The connector never interprets labels; which label means
+`drive.metadata` (full `drive` implies it, so the `full` profile gets them
+too). The connector never interprets labels; which label means
 what is policy, decided elsewhere. Note `drive.file` is NOT enough here: it
 403s on files the app did not create.
 
@@ -105,7 +106,7 @@ Each tool declares the Google scope it needs (the first argument to
 |-------------------------|---------------------------------------------------------|
 | `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
-| `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
+| `drive.labels.readonly` | `get_file` label enrichment (`_meta.applied`), no tool of its own |
 | `drive.metadata`        | `set_file_label`, `remove_file_label`                   |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
