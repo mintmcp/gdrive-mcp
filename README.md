@@ -23,7 +23,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
 - `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
-  the `labels` and `full` profiles; enables `get_file`'s label
+  the `labels`, `labels-write` and `full` profiles; enables `get_file`'s label
   enrichment (see [Drive label enrichment](#drive-label-enrichment))
 - `https://www.googleapis.com/auth/drive.metadata` — optional, only in the
   `labels-write` profile; enables `set_file_label` /
@@ -81,6 +81,10 @@ is returned; absence means "surfacing not enabled", never "no labels".
 too). The connector never interprets labels; which label means
 what is policy, decided elsewhere. Note `drive.file` is NOT enough here: it
 403s on files the app did not create.
+
+Date, text, integer and selection fields are writable; `user` fields are not
+(PII, matching the read side withholding them), and there is no per-field
+unset — `remove_file_label` strips the whole label.
 
 Label creation and publishing stay a one-time Workspace-admin action outside
 the connector; callers supply `label_id` / `field_id` (both server-assigned).
@@ -157,7 +161,7 @@ curl -s -X POST http://localhost:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer fake-token" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
-# lists the tools the active profile registers (all 12 when PROFILE is unset)
+# lists the tools the active profile registers (all of them when PROFILE is unset)
 ```
 
 A fake token returns a structured 401 from the Drive API (with a "reconnect
