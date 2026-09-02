@@ -12,10 +12,10 @@ import {
   requiresBase64,
   buildFileUpdate,
   formatDriveFile,
-  buildFieldModifications,
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
+import { buildFieldModifications } from './labels.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {

@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
-import { fetchLabelsMeta } from './labels.js';
+import { fetchLabelsMeta, buildFieldModifications } from './labels.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
@@ -372,55 +372,6 @@ const MAX_PERMISSION_PAGES = 10;
 
 
 
-export type LabelFieldInput = {
-  field_id: string;
-  date_value?: string;
-  text_values?: string[];
-  selection_choice_ids?: string[];
-};
-
-/**
- * Validate tool input and build files.modifyLabels fieldModifications.
- * Throws with a caller-actionable message so bad input becomes a tool
- * error before any API call
- */
-export function buildFieldModifications(fields: LabelFieldInput[]): Array<Record<string, unknown>> {
-  if (fields.length === 0) {
-    throw new Error('fields must contain at least one field');
-  }
-  return fields.map((f) => {
-    const kinds = [f.date_value, f.text_values, f.selection_choice_ids]
-      .filter((v) => v !== undefined).length;
-    if (kinds !== 1) {
-      throw new Error(
-        `field '${f.field_id}': provide exactly one of date_value, text_values, selection_choice_ids`
-      );
-    }
-    if (f.date_value !== undefined) {
-      // Date round-trips through ISO because V8 normalizes impossible days
-      // (2026-02-31 parses as Mar 3 UTC) instead of rejecting them
-      const parsed = new Date(`${f.date_value}T00:00:00Z`);
-      if (
-        !/^\d{4}-\d{2}-\d{2}$/.test(f.date_value) ||
-        Number.isNaN(parsed.getTime()) ||
-        parsed.toISOString().slice(0, 10) !== f.date_value
-      ) {
-        throw new Error(`field '${f.field_id}': date_value must be a valid YYYY-MM-DD date`);
-      }
-      return { fieldId: f.field_id, setDateValues: [f.date_value] };
-    }
-    if (f.text_values !== undefined) {
-      if (f.text_values.length === 0) {
-        throw new Error(`field '${f.field_id}': text_values must not be empty`);
-      }
-      return { fieldId: f.field_id, setTextValues: f.text_values };
-    }
-    if (f.selection_choice_ids!.length === 0) {
-      throw new Error(`field '${f.field_id}': selection_choice_ids must not be empty`);
-    }
-    return { fieldId: f.field_id, setSelectionValues: f.selection_choice_ids };
-  });
-}
 
 // Reusable output schema fragments — tolerant (all leaves optional, passthrough outer)
 const driveFileSchema = z.object({
