@@ -44,6 +44,7 @@ describe("grantedScopes", () => {
     const granted = grantedScopes("full");
     expect(granted?.has(SCOPES.DRIVE_FILE)).toBe(true);
     expect(granted?.has(SCOPES.DRIVE_READONLY)).toBe(true);
+    expect(granted?.has(SCOPES.DRIVE_METADATA)).toBe(true);
   });
 
   test("an unknown profile fails at boot, not silently serving every tool", () => {
@@ -101,8 +102,8 @@ describe("createServer tool surface", () => {
       .toEqual([...CORE_TOOLS, "remove_file_label", "set_file_label"].sort());
   });
 
-  test("the full profile registers the core tools, via the implication map", () => {
-    expect(toolNames(grantedScopes("full"))).toEqual(CORE_TOOLS);
+  test("the full profile registers every tool, via the implication map", () => {
+    expect(toolNames(grantedScopes("full"))).toEqual(ALL_TOOLS);
   });
 
   test("every profile's tools are a subset of the unrestricted surface", () => {
