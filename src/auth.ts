@@ -21,15 +21,9 @@ export function bearerTokenFromHeader(header: string | undefined): string {
   return header?.match(/^Bearer\s+(.*)$/i)?.[1].trim() ?? "";
 }
 
-export function requiresAccessToken(body: unknown): boolean {
-  return messagesOf(body).some((m) => m.method === "tools/call");
-}
-
-// initialize and tools/list stay open: MintMCP health-checks by running
-// initialize against /mcp, so 401ing that marks the connector down
 export const requireAccessToken: RequestHandler = (req, res, next) => {
   const accessToken = bearerTokenFromHeader(req.header("authorization"));
-  if (!accessToken && requiresAccessToken(req.body)) {
+  if (!accessToken) {
     res
       .status(401)
       .set(
