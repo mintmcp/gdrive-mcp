@@ -226,17 +226,26 @@ describe('buildLabelModification', () => {
       });
   });
 
-  it('maps text and selection fields to their set arrays', () => {
+  it('maps text, integer, and selection fields to their set arrays', () => {
     expect(buildLabelModification('lbl1', [
       { field_id: 'f1', text_values: ['a', 'b'] },
       { field_id: 'f2', selection_choice_ids: ['c1'] },
+      { field_id: 'f3', integer_values: ['3', '-7'] },
     ])).toEqual({
       labelId: 'lbl1',
       fieldModifications: [
         { fieldId: 'f1', setTextValues: ['a', 'b'] },
         { fieldId: 'f2', setSelectionValues: ['c1'] },
+        { fieldId: 'f3', setIntegerValues: ['3', '-7'] },
       ],
     });
+  });
+
+  it('rejects non-integer integer_values', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: ['3.5'] }]))
+      .toThrow(/whole numbers/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: ['abc'] }]))
+      .toThrow(/whole numbers/);
   });
 
   it('omits fieldModifications entirely for a label with no fields', () => {
@@ -268,6 +277,8 @@ describe('buildLabelModification', () => {
     expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', text_values: [] }]))
       .toThrow(/empty/);
     expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', selection_choice_ids: [] }]))
+      .toThrow(/empty/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: [] }]))
       .toThrow(/empty/);
   });
 });

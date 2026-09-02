@@ -210,6 +210,7 @@ export type LabelFieldInput = {
   field_id: string;
   date_value?: string;
   text_values?: string[];
+  integer_values?: string[];
   selection_choice_ids?: string[];
 };
 
@@ -221,11 +222,11 @@ export type LabelFieldInput = {
  */
 export function buildLabelModification(labelId: string, fields: LabelFieldInput[]): Record<string, unknown> {
   const fieldModifications = fields.map((f) => {
-    const kinds = [f.date_value, f.text_values, f.selection_choice_ids]
+    const kinds = [f.date_value, f.text_values, f.integer_values, f.selection_choice_ids]
       .filter((v) => v !== undefined).length;
     if (kinds !== 1) {
       throw new Error(
-        `field '${f.field_id}': provide exactly one of date_value, text_values, selection_choice_ids`
+        `field '${f.field_id}': provide exactly one of date_value, text_values, integer_values, selection_choice_ids (user fields cannot be set by this tool)`
       );
     }
     if (f.date_value !== undefined) {
@@ -247,6 +248,17 @@ export function buildLabelModification(labelId: string, fields: LabelFieldInput[
       }
       return { fieldId: f.field_id, setTextValues: f.text_values };
     }
+    if (f.integer_values !== undefined) {
+      if (f.integer_values.length === 0) {
+        throw new Error(`field '${f.field_id}': integer_values must not be empty`);
+      }
+      for (const v of f.integer_values) {
+        if (!/^-?\d+$/.test(v)) {
+          throw new Error(`field '${f.field_id}': integer_values entries must be whole numbers, got '${v}'`);
+        }
+      }
+      return { fieldId: f.field_id, setIntegerValues: f.integer_values };
+    }
     const choiceIds = f.selection_choice_ids ?? [];
     if (choiceIds.length === 0) {
       throw new Error(`field '${f.field_id}': selection_choice_ids must not be empty`);
@@ -259,12 +271,12 @@ export function buildLabelModification(labelId: string, fields: LabelFieldInput[
   };
 }
 
-export function modifyFileLabels(
+export async function modifyFileLabels(
   fileId: string,
   accessToken: string,
   labelModification: Record<string, unknown>
-): Promise<any> {
-  return makeDriveRequest(
+): Promise<Record<string, unknown>> {
+  const result = await makeDriveRequest(
     `/files/${encodeURIComponent(fileId)}/modifyLabels`,
     accessToken,
     {
@@ -273,4 +285,9 @@ export function modifyFileLabels(
       body: JSON.stringify({ labelModifications: [labelModification] }),
     }
   );
+  // A 2xx with an empty or non-JSON body must not read as a clean no-op
+  if (result === null || typeof result !== 'object') {
+    throw new Error(`modifyLabels returned an unexpected response: ${String(result).slice(0, 200)}`);
+  }
+  return result;
 }

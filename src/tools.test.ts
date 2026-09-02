@@ -489,6 +489,30 @@ describe('set_file_label / remove_file_label handlers', () => {
     });
   });
 
+  it('treats an explicit empty fields array like omitted fields', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lblBadge' }] })],
+    ]);
+    const res = await call('set_file_label', { file_id: 'f1', label_id: 'lblBadge', fields: [] });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{ labelId: 'lblBadge' }],
+    });
+  });
+
+  it('rejects a non-object 2xx body instead of reporting success', async () => {
+    stubFetch([
+      ['modifyLabels', () => new Response('<html>gateway</html>', { status: 200, headers: { 'Content-Type': 'text/html' } })],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', text_values: ['x'] }],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/unexpected response/);
+  });
+
   it('returns a tool error without calling the API on invalid fields', async () => {
     const calls = stubFetch([]);
     const res = await call('set_file_label', {
@@ -516,7 +540,7 @@ describe('set_file_label / remove_file_label handlers', () => {
 
   it('POSTs modifyLabels with removeLabel for remove_file_label', async () => {
     const calls = stubFetch([
-      ['modifyLabels', () => jsonResponse({ modifiedLabels: [] })],
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lbl1' }] })],
     ]);
     const res = await call('remove_file_label', { file_id: 'f1', label_id: 'lbl1' });
     expect(res.isError).toBeUndefined();
@@ -524,6 +548,15 @@ describe('set_file_label / remove_file_label handlers', () => {
       labelModifications: [{ labelId: 'lbl1', removeLabel: true }],
     });
     expect(res.structuredContent.message).toMatch(/removed/i);
+  });
+
+  it('flags a remove that Drive reports as a no-op instead of claiming removal', async () => {
+    stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [] })],
+    ]);
+    const res = await call('remove_file_label', { file_id: 'f1', label_id: 'lbl1' });
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.message).toMatch(/no modification/i);
   });
 
   it('passes remove API errors through formatDriveError', async () => {
