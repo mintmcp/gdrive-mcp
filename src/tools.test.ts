@@ -15,7 +15,6 @@ import {
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
-import { buildFieldModifications } from './labels.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
@@ -452,50 +451,6 @@ describe('decodeUploadContent on large payloads', () => {
 });
 
 
-describe('buildFieldModifications', () => {
-  it('maps a date field to setDateValues', () => {
-    expect(buildFieldModifications([{ field_id: 'f1', date_value: '2026-08-30' }]))
-      .toEqual([{ fieldId: 'f1', setDateValues: ['2026-08-30'] }]);
-  });
-
-  it('maps text and selection fields to their set arrays', () => {
-    expect(buildFieldModifications([
-      { field_id: 'f1', text_values: ['a', 'b'] },
-      { field_id: 'f2', selection_choice_ids: ['c1'] },
-    ])).toEqual([
-      { fieldId: 'f1', setTextValues: ['a', 'b'] },
-      { fieldId: 'f2', setSelectionValues: ['c1'] },
-    ]);
-  });
-
-  it('rejects a field with no value kind', () => {
-    expect(() => buildFieldModifications([{ field_id: 'f1' }]))
-      .toThrow(/exactly one of/);
-  });
-
-  it('rejects a field with two value kinds', () => {
-    expect(() => buildFieldModifications([
-      { field_id: 'f1', date_value: '2026-08-30', text_values: ['x'] },
-    ])).toThrow(/exactly one of/);
-  });
-
-  it('rejects a malformed or impossible date', () => {
-    expect(() => buildFieldModifications([{ field_id: 'f1', date_value: '30/08/2026' }]))
-      .toThrow(/YYYY-MM-DD/);
-    expect(() => buildFieldModifications([{ field_id: 'f1', date_value: '2026-13-40' }]))
-      .toThrow(/YYYY-MM-DD/);
-    // V8 would silently normalize this to Mar 2
-    expect(() => buildFieldModifications([{ field_id: 'f1', date_value: '2026-02-31' }]))
-      .toThrow(/YYYY-MM-DD/);
-  });
-
-  it('rejects empty value arrays and an empty fields list', () => {
-    expect(() => buildFieldModifications([{ field_id: 'f1', text_values: [] }]))
-      .toThrow(/empty/);
-    expect(() => buildFieldModifications([])).toThrow(/at least one field/);
-  });
-});
-
 describe('set_file_label / remove_file_label handlers', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -521,6 +476,17 @@ describe('set_file_label / remove_file_label handlers', () => {
       }],
     });
     expect(res.structuredContent.modifiedLabels).toEqual([{ id: 'lbl1', revisionId: 'rev7' }]);
+  });
+
+  it('applies a field-less badge label with no fieldModifications in the body', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lblBadge' }] })],
+    ]);
+    const res = await call('set_file_label', { file_id: 'f1', label_id: 'lblBadge' });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{ labelId: 'lblBadge' }],
+    });
   });
 
   it('returns a tool error without calling the API on invalid fields', async () => {

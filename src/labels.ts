@@ -214,15 +214,13 @@ export type LabelFieldInput = {
 };
 
 /**
- * Validate tool input and build files.modifyLabels fieldModifications.
+ * Validate tool input and build a files.modifyLabels LabelModification.
  * Throws with a caller-actionable message so bad input becomes a tool
- * error before any API call
+ * error before any API call. Empty fields applies the bare label: the
+ * API wants fieldModifications absent, not [], for that
  */
-export function buildFieldModifications(fields: LabelFieldInput[]): Array<Record<string, unknown>> {
-  if (fields.length === 0) {
-    throw new Error('fields must contain at least one field');
-  }
-  return fields.map((f) => {
+export function buildLabelModification(labelId: string, fields: LabelFieldInput[]): Record<string, unknown> {
+  const fieldModifications = fields.map((f) => {
     const kinds = [f.date_value, f.text_values, f.selection_choice_ids]
       .filter((v) => v !== undefined).length;
     if (kinds !== 1) {
@@ -249,9 +247,30 @@ export function buildFieldModifications(fields: LabelFieldInput[]): Array<Record
       }
       return { fieldId: f.field_id, setTextValues: f.text_values };
     }
-    if (f.selection_choice_ids!.length === 0) {
+    const choiceIds = f.selection_choice_ids ?? [];
+    if (choiceIds.length === 0) {
       throw new Error(`field '${f.field_id}': selection_choice_ids must not be empty`);
     }
-    return { fieldId: f.field_id, setSelectionValues: f.selection_choice_ids };
+    return { fieldId: f.field_id, setSelectionValues: choiceIds };
   });
+  return {
+    labelId,
+    ...(fieldModifications.length ? { fieldModifications } : {}),
+  };
+}
+
+export function modifyFileLabels(
+  fileId: string,
+  accessToken: string,
+  labelModification: Record<string, unknown>
+): Promise<any> {
+  return makeDriveRequest(
+    `/files/${encodeURIComponent(fileId)}/modifyLabels`,
+    accessToken,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labelModifications: [labelModification] }),
+    }
+  );
 }

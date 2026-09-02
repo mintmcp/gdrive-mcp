@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getLabelInfo, getFileLabels } from './labels.js';
+import { getLabelInfo, getFileLabels, buildLabelModification } from './labels.js';
 import { stubFetch, jsonResponse, LABEL_SCHEMA_BODY } from './testStubs.js';
 
 describe('getLabelInfo', () => {
@@ -216,3 +216,58 @@ describe('getFileLabels', () => {
   });
 });
 
+
+describe('buildLabelModification', () => {
+  it('maps a date field to setDateValues', () => {
+    expect(buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-08-30' }]))
+      .toEqual({
+        labelId: 'lbl1',
+        fieldModifications: [{ fieldId: 'f1', setDateValues: ['2026-08-30'] }],
+      });
+  });
+
+  it('maps text and selection fields to their set arrays', () => {
+    expect(buildLabelModification('lbl1', [
+      { field_id: 'f1', text_values: ['a', 'b'] },
+      { field_id: 'f2', selection_choice_ids: ['c1'] },
+    ])).toEqual({
+      labelId: 'lbl1',
+      fieldModifications: [
+        { fieldId: 'f1', setTextValues: ['a', 'b'] },
+        { fieldId: 'f2', setSelectionValues: ['c1'] },
+      ],
+    });
+  });
+
+  it('omits fieldModifications entirely for a label with no fields', () => {
+    expect(buildLabelModification('lbl1', [])).toEqual({ labelId: 'lbl1' });
+  });
+
+  it('rejects a field with no value kind', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1' }]))
+      .toThrow(/exactly one of/);
+  });
+
+  it('rejects a field with two value kinds', () => {
+    expect(() => buildLabelModification('lbl1', [
+      { field_id: 'f1', date_value: '2026-08-30', text_values: ['x'] },
+    ])).toThrow(/exactly one of/);
+  });
+
+  it('rejects a malformed or impossible date', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '30/08/2026' }]))
+      .toThrow(/YYYY-MM-DD/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-13-40' }]))
+      .toThrow(/YYYY-MM-DD/);
+    // V8 would silently normalize this to Mar 2
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-02-31' }]))
+      .toThrow(/YYYY-MM-DD/);
+  });
+
+  it('rejects empty value arrays', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', text_values: [] }]))
+      .toThrow(/empty/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', selection_choice_ids: [] }]))
+      .toThrow(/empty/);
+  });
+});

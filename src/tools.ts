@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
-import { fetchLabelsMeta, buildFieldModifications } from './labels.js';
+import { fetchLabelsMeta, buildLabelModification, modifyFileLabels } from './labels.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
@@ -369,7 +369,6 @@ export function buildFileUpdate(args: {
 // Bound get_file_permissions pagination by page COUNT, not just token presence,
 // so a buggy/repeating nextPageToken from Drive can't spin forever.
 const MAX_PERMISSION_PAGES = 10;
-
 
 
 
@@ -1481,7 +1480,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       set_file_label: {
-        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Use remove_file_label to strip a label. The label and its fields must already exist and be published; label_id and field_id come from the Drive admin or from get_file results (_meta.labels).',
+        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. Use remove_file_label to strip a label. The label and its fields must already exist and be published; label_id and field_id come from the Drive admin or from get_file_metadata results (labels).',
         outputSchema: {
           modifiedLabels: z.array(
             z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
@@ -1496,30 +1495,20 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             date_value: z.string().optional().describe('Date field value, YYYY-MM-DD. Drive date fields are day-granular.'),
             text_values: z.array(z.string()).optional().describe('Text field values.'),
             selection_choice_ids: z.array(z.string()).optional().describe('Selection field choice IDs.'),
-          })).min(1).describe('Exactly one value kind per field entry.'),
+          })).optional().describe('Exactly one value kind per field entry. Omit to apply a label with no fields.'),
         },
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id, fields }: any, context: any) => {
           const { accessToken } = context;
 
-          let fieldModifications: Array<Record<string, unknown>>;
+          let labelModification: Record<string, unknown>;
           try {
-            fieldModifications = buildFieldModifications(fields);
+            labelModification = buildLabelModification(label_id, fields ?? []);
           } catch (err) {
             return formatDriveError(err);
           }
 
           try {
-            const result = await makeDriveRequest(
-              `/files/${encodeURIComponent(file_id)}/modifyLabels`,
-              accessToken,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  labelModifications: [{ labelId: label_id, fieldModifications }],
-                }),
-              }
-            );
+            const result = await modifyFileLabels(file_id, accessToken, labelModification);
             const output = {
               modifiedLabels: result?.modifiedLabels ?? [],
               message: 'Label set successfully',
@@ -1535,7 +1524,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       remove_file_label: {
-        description: 'Remove a Google Drive label from a file entirely (all its field values with it). Counterpart to set_file_label; removing a label is always safe and reversible by setting it again.',
+        description: 'Remove a Google Drive label from a file entirely, discarding its field values (re-applying needs them supplied again). Counterpart to set_file_label.',
         destructiveHint: true,
         outputSchema: {
           message: z.string(),
@@ -1548,17 +1537,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const { accessToken } = context;
 
           try {
-            await makeDriveRequest(
-              `/files/${encodeURIComponent(file_id)}/modifyLabels`,
-              accessToken,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  labelModifications: [{ labelId: label_id, removeLabel: true }],
-                }),
-              }
-            );
+            await modifyFileLabels(file_id, accessToken, { labelId: label_id, removeLabel: true });
             const output = { message: 'Label removed successfully' };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
