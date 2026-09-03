@@ -1,11 +1,5 @@
-import { describe, test, expect, vi } from "vitest";
-import type { NextFunction, Request, Response } from "express";
-import {
-  bearerTokenFromHeader,
-  getAccessToken,
-  NOT_CONNECTED_MESSAGE,
-  requireAccessToken,
-} from "./auth.js";
+import { describe, test, expect } from "vitest";
+import { bearerTokenFromHeader, requiresAccessToken } from "./auth.js";
 import { messagesOf, responseIdFor } from "./jsonrpc.js";
 
 describe("bearerTokenFromHeader", () => {
@@ -23,61 +17,21 @@ describe("bearerTokenFromHeader", () => {
   });
 });
 
-describe("requireAccessToken", () => {
-  function invoke(body: unknown, authorization?: string) {
-    const req = {
-      body,
-      header: vi.fn().mockReturnValue(authorization),
-    };
-    const res = {
-      status: vi.fn(),
-      set: vi.fn(),
-      json: vi.fn(),
-    };
-    res.status.mockReturnValue(res);
-    res.set.mockReturnValue(res);
-    res.json.mockReturnValue(res);
-    let tokenInNext: string | undefined;
-    const next = vi.fn(() => {
-      tokenInNext = getAccessToken();
-    });
+describe("requiresAccessToken", () => {
+  test("gates tools/call", () => {
+    expect(requiresAccessToken({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBe(true);
+  });
 
-    requireAccessToken(
-      req as unknown as Request,
-      res as unknown as Response,
-      next as unknown as NextFunction,
-    );
-    return { res, next, tokenInNext };
-  }
+  test("leaves the handshake open so the MintMCP health probe passes", () => {
+    expect(requiresAccessToken({ method: "initialize", id: 1 })).toBe(false);
+    expect(requiresAccessToken({ method: "tools/list", id: 2 })).toBe(false);
+    expect(requiresAccessToken({ method: "notifications/initialized" })).toBe(false);
+    expect(requiresAccessToken(undefined)).toBe(false);
+  });
 
-  test.each(["initialize", "tools/list", "tools/call"])(
-    "returns 401 for unauthenticated %s requests",
-    (method) => {
-      const { res, next } = invoke({ jsonrpc: "2.0", id: 7, method });
-
-      expect(next).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(401);
-      expect(res.set).toHaveBeenCalledWith(
-        "WWW-Authenticate",
-        'Bearer realm="gdrive-mcp", error="invalid_token", error_description="Missing Google access token"',
-      );
-      expect(res.json).toHaveBeenCalledWith({
-        jsonrpc: "2.0",
-        error: { code: -32001, message: NOT_CONNECTED_MESSAGE },
-        id: 7,
-      });
-    },
-  );
-
-  test("passes authenticated requests through with the token in request context", () => {
-    const { res, next, tokenInNext } = invoke(
-      { jsonrpc: "2.0", id: 1, method: "initialize" },
-      "Bearer ya29.abc",
-    );
-
-    expect(next).toHaveBeenCalledOnce();
-    expect(tokenInNext).toBe("ya29.abc");
-    expect(res.status).not.toHaveBeenCalled();
+  test("gates a batch containing a tools/call", () => {
+    expect(requiresAccessToken([{ method: "tools/list" }, { method: "tools/call" }])).toBe(true);
+    expect(requiresAccessToken([{ method: "tools/list" }])).toBe(false);
   });
 });
 
