@@ -538,25 +538,18 @@ describe('set_file_label / remove_file_label handlers', () => {
     expect(JSON.parse(res.content[0].text).status).toBe(403);
   });
 
-  it('POSTs modifyLabels with removeLabel for remove_file_label', async () => {
+  it('POSTs modifyLabels with removeLabel and states the ensure-absent outcome', async () => {
+    // Live-verified: Drive returns modifiedLabels [] for removals whether or
+    // not the label was applied, so the message states the post-condition
     const calls = stubFetch([
-      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lbl1' }] })],
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [] })],
     ]);
     const res = await call('remove_file_label', { file_id: 'f1', label_id: 'lbl1' });
     expect(res.isError).toBeUndefined();
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({
       labelModifications: [{ labelId: 'lbl1', removeLabel: true }],
     });
-    expect(res.structuredContent.message).toMatch(/removed/i);
-  });
-
-  it('flags a remove that Drive reports as a no-op instead of claiming removal', async () => {
-    stubFetch([
-      ['modifyLabels', () => jsonResponse({ modifiedLabels: [] })],
-    ]);
-    const res = await call('remove_file_label', { file_id: 'f1', label_id: 'lbl1' });
-    expect(res.isError).toBeUndefined();
-    expect(res.structuredContent.message).toMatch(/no modification/i);
+    expect(res.structuredContent.message).toMatch(/no longer carries/i);
   });
 
   it('passes remove API errors through formatDriveError', async () => {

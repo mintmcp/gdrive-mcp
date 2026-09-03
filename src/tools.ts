@@ -1536,11 +1536,11 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
           try {
             const modifiedLabels = await modifyFileLabels(file_id, accessToken, { labelId: label_id, removeLabel: true });
+            // Google echoes only set labels in modifiedLabels; removals return []
+            // whether or not the label was present, so state the post-condition
             const output = {
               modifiedLabels,
-              message: modifiedLabels.length
-                ? 'Label removed successfully'
-                : 'Drive reported no modification; the label may not have been applied to this file',
+              message: 'Label removed; the file no longer carries this label',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
