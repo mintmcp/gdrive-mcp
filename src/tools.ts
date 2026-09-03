@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
-import { fetchLabelsMeta, buildLabelModification, modifyFileLabels } from './labels.js';
+import { fetchLabelsMeta, buildLabelModification, modifyFileLabels, listAvailableLabels } from './labels.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
@@ -1483,8 +1483,51 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         }),
       },
 
+      list_labels: {
+        description: 'List the published Google Drive labels visible to the user: label ids, titles, and each field\'s id, type (date, text, integer, selection, or user), and selection choices. Use this to discover the label_id, field_id, and choice ids that set_file_label and remove_file_label need. Read-only and file-independent; does not say which files carry a label.',
+        outputSchema: {
+          labels: z.array(z.object({
+            labelId: z.string().optional(),
+            revisionId: z.string().optional(),
+            title: z.string().optional(),
+            fields: z.array(z.object({
+              fieldId: z.string().optional(),
+              type: z.string().optional(),
+              displayName: z.string().optional(),
+              choices: z.array(z.object({
+                choiceId: z.string().optional(),
+                displayName: z.string().optional(),
+              }).passthrough()).optional(),
+            }).passthrough()).optional(),
+          }).passthrough()),
+          truncated: z.boolean().optional(),
+          message: z.string(),
+        },
+        schema: {},
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.labels.readonly", async (_args: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const { labels, truncated } = await listAvailableLabels(accessToken);
+            const output = {
+              labels,
+              ...(truncated ? { truncated: true } : {}),
+              message: labels.length
+                ? `${labels.length} published label(s) visible to this user`
+                : 'No published labels are visible to this user',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
       set_file_label: {
-        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, integer, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. User-type fields cannot be set, and single fields cannot be unset; use remove_file_label to strip a whole label. The label and its fields must already exist and be published; label_id and field_id come from the Drive admin or from get_file_metadata results (labels).',
+        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, integer, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. User-type fields cannot be set, and single fields cannot be unset; use remove_file_label to strip a whole label. The label and its fields must already exist and be published; discover label_id and field_id with list_labels, or from get_file_metadata results (labels).',
         outputSchema: {
           modifiedLabels: modifiedLabelsSchema,
           message: z.string(),

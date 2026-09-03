@@ -45,7 +45,8 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
 | Upload          | `upload_file`          | Text or base64 content; optional convert to a Google type. |
-| Labels          | `set_file_label`       | Apply/update a label's date, text, or selection values.    |
+| Labels          | `list_labels`          | Published label taxonomy: label/field/choice ids.          |
+|                 | `set_file_label`       | Apply/update a label's date, text, integer, or selection values. |
 |                 | `remove_file_label`    | Strip a label (and its values) from a file.                |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
@@ -87,7 +88,8 @@ Date, text, integer and selection fields are writable; `user` fields are not
 unset — `remove_file_label` strips the whole label.
 
 Label creation and publishing stay a one-time Workspace-admin action outside
-the connector; callers supply `label_id` / `field_id` (both server-assigned).
+the connector; `list_labels` surfaces the published taxonomy so callers can
+discover `label_id` / `field_id` (both server-assigned).
 Platform approval rules can gate `set_file_label` while leaving
 `remove_file_label` ungated — revoking is always safe.
 
@@ -110,7 +112,7 @@ Each tool declares the Google scope it needs (the first argument to
 |-------------------------|---------------------------------------------------------|
 | `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
-| `drive.labels.readonly` | `get_file` label enrichment (`_meta.applied`), no tool of its own |
+| `drive.labels.readonly` | `list_labels`, plus `get_file` label enrichment (`_meta.applied`) |
 | `drive.metadata`        | `set_file_label`, `remove_file_label`                   |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the

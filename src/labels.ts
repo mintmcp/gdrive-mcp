@@ -206,6 +206,84 @@ export function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Re
   }));
 }
 
+export type LabelTaxonomyField = {
+  fieldId: string;
+  type: string;
+  displayName?: string;
+  choices?: Array<{ choiceId: string; displayName?: string }>;
+};
+
+export type LabelTaxonomyEntry = {
+  labelId: string;
+  revisionId?: string;
+  title?: string;
+  fields: LabelTaxonomyField[];
+};
+
+export async function listAvailableLabels(
+  accessToken: string
+): Promise<{ labels: LabelTaxonomyEntry[]; truncated: boolean }> {
+  type WireField = {
+    id?: string;
+    properties?: { displayName?: string };
+    selectionOptions?: { choices?: Array<{ id?: string; properties?: { displayName?: string } }> };
+    textOptions?: unknown;
+    dateOptions?: unknown;
+    integerOptions?: unknown;
+    userOptions?: unknown;
+  };
+  type WireLabel = {
+    id?: string;
+    revisionId?: string;
+    properties?: { title?: string };
+    fields?: WireField[];
+  };
+
+  const fieldType = (f: WireField): string => {
+    if (f.selectionOptions) return 'selection';
+    if (f.textOptions) return 'text';
+    if (f.dateOptions) return 'date';
+    if (f.integerOptions) return 'integer';
+    if (f.userOptions) return 'user';
+    return 'unknown';
+  };
+
+  const labels: LabelTaxonomyEntry[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_LABEL_PAGES; page++) {
+    const params = new URLSearchParams({ view: 'LABEL_VIEW_FULL', publishedOnly: 'true', pageSize: '100' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const data = await makeDriveRequest(
+      `${DRIVE_LABELS_API}/labels?${params}`,
+      accessToken
+    ) as { labels?: WireLabel[]; nextPageToken?: string } | null;
+
+    for (const label of data?.labels || []) {
+      if (!label.id) continue;
+      labels.push({
+        labelId: label.id,
+        ...(label.revisionId ? { revisionId: label.revisionId } : {}),
+        ...(label.properties?.title ? { title: label.properties.title } : {}),
+        fields: (label.fields || []).flatMap((f) => f.id === undefined ? [] : [{
+          fieldId: f.id,
+          type: fieldType(f),
+          ...(f.properties?.displayName ? { displayName: f.properties.displayName } : {}),
+          ...(f.selectionOptions ? {
+            choices: (f.selectionOptions.choices || []).flatMap((c) => c.id === undefined ? [] : [{
+              choiceId: c.id,
+              ...(c.properties?.displayName ? { displayName: c.properties.displayName } : {}),
+            }]),
+          } : {}),
+        }]),
+      });
+    }
+
+    pageToken = data?.nextPageToken;
+    if (!pageToken) return { labels, truncated: false };
+  }
+  return { labels, truncated: true };
+}
+
 export type LabelFieldInput = {
   field_id: string;
   date_value?: string;

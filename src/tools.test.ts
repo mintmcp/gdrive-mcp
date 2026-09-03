@@ -451,6 +451,38 @@ describe('decodeUploadContent on large payloads', () => {
 });
 
 
+describe('list_labels handler', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const tools = GoogleDriveTools.getTools() as any;
+  const call = (args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () => tools.list_labels.handler(args));
+
+  it('lists published labels with fields and choices', async () => {
+    const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse({
+      labels: [{
+        id: 'lbl1', properties: { title: 'Classification' },
+        fields: [{ id: 'f1', selectionOptions: { choices: [{ id: 'c1', properties: { displayName: 'Secret' } }] } }],
+      }],
+    })]]);
+    const res = await call({});
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].url).toContain('publishedOnly=true');
+    expect(res.structuredContent.labels).toEqual([{
+      labelId: 'lbl1', title: 'Classification',
+      fields: [{ fieldId: 'f1', type: 'selection', choices: [{ choiceId: 'c1', displayName: 'Secret' }] }],
+    }]);
+    expect(res.structuredContent.message).toMatch(/1 published label/);
+  });
+
+  it('passes API errors through formatDriveError', async () => {
+    stubFetch([['drivelabels.googleapis.com', () => jsonResponse({ error: { message: 'denied' } }, 403)]]);
+    const res = await call({});
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).status).toBe(403);
+  });
+});
+
 describe('set_file_label / remove_file_label handlers', () => {
   afterEach(() => vi.unstubAllGlobals());
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getLabelInfo, getFileLabels, buildLabelModification } from './labels.js';
+import { getLabelInfo, getFileLabels, buildLabelModification, listAvailableLabels } from './labels.js';
 import { stubFetch, jsonResponse, LABEL_SCHEMA_BODY } from './testStubs.js';
 
 describe('getLabelInfo', () => {
@@ -280,5 +280,69 @@ describe('buildLabelModification', () => {
       .toThrow(/empty/);
     expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: [] }]))
       .toThrow(/empty/);
+  });
+});
+
+describe('listAvailableLabels', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('maps labels with typed fields and selection choices', async () => {
+    const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse({
+      labels: [
+        {
+          id: 'lblGrant', revisionId: '2', properties: { title: 'Write Grant' },
+          fields: [
+            { id: 'fDate', properties: { displayName: 'Allowed until' }, dateOptions: {} },
+            { id: 'fWho', properties: { displayName: 'Approver' }, userOptions: {} },
+          ],
+        },
+        {
+          id: 'lblClass', properties: { title: 'Classification' },
+          fields: [{
+            id: 'fLevel', selectionOptions: { choices: [
+              { id: 'cSecret', properties: { displayName: 'Secret' } },
+              { id: 'cOpen', properties: { displayName: 'Open' } },
+            ] },
+          }],
+        },
+        { id: 'lblBadge', properties: { title: 'Badge' } },
+      ],
+    })]]);
+    const res = await listAvailableLabels('tok');
+    expect(calls[0].url).toContain('/v2/labels?');
+    expect(calls[0].url).toContain('publishedOnly=true');
+    expect(res.truncated).toBe(false);
+    expect(res.labels).toEqual([
+      {
+        labelId: 'lblGrant', revisionId: '2', title: 'Write Grant',
+        fields: [
+          { fieldId: 'fDate', type: 'date', displayName: 'Allowed until' },
+          { fieldId: 'fWho', type: 'user', displayName: 'Approver' },
+        ],
+      },
+      {
+        labelId: 'lblClass', title: 'Classification',
+        fields: [{
+          fieldId: 'fLevel', type: 'selection',
+          choices: [
+            { choiceId: 'cSecret', displayName: 'Secret' },
+            { choiceId: 'cOpen', displayName: 'Open' },
+          ],
+        }],
+      },
+      { labelId: 'lblBadge', title: 'Badge', fields: [] },
+    ]);
+  });
+
+  it('follows pagination and flags the page cap as truncation', async () => {
+    let page = 0;
+    stubFetch([['drivelabels.googleapis.com', () => {
+      page += 1;
+      return jsonResponse({ labels: [{ id: `lbl${page}` }], nextPageToken: 'again' });
+    }]]);
+    const res = await listAvailableLabels('tok');
+    expect(page).toBe(10);
+    expect(res.labels).toHaveLength(10);
+    expect(res.truncated).toBe(true);
   });
 });

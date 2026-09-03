@@ -86,7 +86,7 @@ const CORE_TOOLS = [
   "upload_file",
 ].sort();
 
-const ALL_TOOLS = [...CORE_TOOLS, "remove_file_label", "set_file_label"].sort();
+const ALL_TOOLS = [...CORE_TOOLS, "list_labels", "remove_file_label", "set_file_label"].sort();
 
 describe("createServer tool surface", () => {
   test("unrestricted registers every tool", () => {
@@ -97,9 +97,13 @@ describe("createServer tool surface", () => {
     expect(toolNames(grantedScopes("standard"))).toEqual(CORE_TOOLS);
   });
 
-  test("labels-write registers the label write tools", () => {
-    expect(toolNames(grantedScopes("labels-write")))
-      .toEqual([...CORE_TOOLS, "remove_file_label", "set_file_label"].sort());
+  test("the labels profile registers taxonomy discovery but no label writes", () => {
+    expect(toolNames(grantedScopes("labels")))
+      .toEqual([...CORE_TOOLS, "list_labels"].sort());
+  });
+
+  test("labels-write registers every tool, the label writes included", () => {
+    expect(toolNames(grantedScopes("labels-write"))).toEqual(ALL_TOOLS);
   });
 
   test("the full profile registers every tool, via the implication map", () => {
@@ -124,6 +128,10 @@ describe("createServer tool surface", () => {
   });
 
   test("a grant covering nothing registers nothing", () => {
-    expect(toolNames(expandScopes([SCOPES.DRIVE_LABELS_READONLY]))).toEqual([]);
+    expect(toolNames(expandScopes([]))).toEqual([]);
+  });
+
+  test("labels.readonly alone registers only taxonomy discovery", () => {
+    expect(toolNames(expandScopes([SCOPES.DRIVE_LABELS_READONLY]))).toEqual(["list_labels"]);
   });
 });
