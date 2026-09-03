@@ -1,7 +1,3 @@
-/**
- * Google Drive MCP Tools
- */
-
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
@@ -485,7 +481,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             // contain an `or` at top level.
             let effectiveQuery = query;
             if (mime_type) {
-              // Single-quote-escape mime_type per Drive q grammar.
               const safeMime = escapeDriveQValue(String(mime_type));
               effectiveQuery = query && query.trim().length > 0
                 ? `(${query}) and mimeType = '${safeMime}'`
@@ -534,7 +529,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               throw error;
             }
 
-            // Format the response
             const files = result.files || [];
             const formattedFiles = files.map(formatDriveFile);
 

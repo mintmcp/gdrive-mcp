@@ -136,7 +136,6 @@ export async function makeDriveRequest(
       try {
         return JSON.parse(text);
       } catch {
-        // non-JSON body on a 2xx, return the raw text
         return text;
       }
     }
