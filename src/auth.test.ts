@@ -18,20 +18,23 @@ describe("bearerTokenFromHeader", () => {
 });
 
 describe("requiresAccessToken", () => {
-  test("gates tools/call", () => {
+  test("gates tools/call and tools/list", () => {
     expect(requiresAccessToken({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBe(true);
+    expect(requiresAccessToken({ jsonrpc: "2.0", id: 2, method: "tools/list" })).toBe(true);
+    expect(requiresAccessToken({ method: "resources/list", id: 3 })).toBe(true);
+    expect(requiresAccessToken({ id: 4 })).toBe(true);
   });
 
   test("leaves the handshake open so the MintMCP health probe passes", () => {
     expect(requiresAccessToken({ method: "initialize", id: 1 })).toBe(false);
-    expect(requiresAccessToken({ method: "tools/list", id: 2 })).toBe(false);
     expect(requiresAccessToken({ method: "notifications/initialized" })).toBe(false);
+    expect(requiresAccessToken({ method: "ping", id: 2 })).toBe(false);
     expect(requiresAccessToken(undefined)).toBe(false);
   });
 
-  test("gates a batch containing a tools/call", () => {
-    expect(requiresAccessToken([{ method: "tools/list" }, { method: "tools/call" }])).toBe(true);
-    expect(requiresAccessToken([{ method: "tools/list" }])).toBe(false);
+  test("gates a batch containing anything past the handshake", () => {
+    expect(requiresAccessToken([{ method: "initialize" }, { method: "tools/list" }])).toBe(true);
+    expect(requiresAccessToken([{ method: "initialize" }])).toBe(false);
   });
 });
 
