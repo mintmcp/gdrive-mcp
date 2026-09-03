@@ -18,20 +18,20 @@ describe("bearerTokenFromHeader", () => {
 });
 
 describe("requiresAccessToken", () => {
-  test("gates tools/call", () => {
+  test("gates tool discovery and tool calls", () => {
+    expect(requiresAccessToken({ jsonrpc: "2.0", id: 1, method: "tools/list" })).toBe(true);
     expect(requiresAccessToken({ jsonrpc: "2.0", id: 1, method: "tools/call" })).toBe(true);
   });
 
-  test("leaves the handshake open so the MintMCP health probe passes", () => {
+  test("leaves initialize open so the MintMCP health probe passes", () => {
     expect(requiresAccessToken({ method: "initialize", id: 1 })).toBe(false);
-    expect(requiresAccessToken({ method: "tools/list", id: 2 })).toBe(false);
     expect(requiresAccessToken({ method: "notifications/initialized" })).toBe(false);
     expect(requiresAccessToken(undefined)).toBe(false);
   });
 
-  test("gates a batch containing a tools/call", () => {
-    expect(requiresAccessToken([{ method: "tools/list" }, { method: "tools/call" }])).toBe(true);
-    expect(requiresAccessToken([{ method: "tools/list" }])).toBe(false);
+  test("gates a batch containing a protected method", () => {
+    expect(requiresAccessToken([{ method: "initialize" }, { method: "tools/list" }])).toBe(true);
+    expect(requiresAccessToken([{ method: "initialize" }])).toBe(false);
   });
 });
 

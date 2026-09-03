@@ -22,11 +22,13 @@ export function bearerTokenFromHeader(header: string | undefined): string {
 }
 
 export function requiresAccessToken(body: unknown): boolean {
-  return messagesOf(body).some((m) => m.method === "tools/call");
+  return messagesOf(body).some(
+    (message) =>
+      message.method === "tools/list" || message.method === "tools/call",
+  );
 }
 
-// initialize and tools/list stay open: MintMCP health-checks by running
-// initialize against /mcp, so 401ing that marks the connector down
+// initialize stays open because MintMCP uses it for Fly readiness probes.
 export const requireAccessToken: RequestHandler = (req, res, next) => {
   const accessToken = bearerTokenFromHeader(req.header("authorization"));
   if (!accessToken && requiresAccessToken(req.body)) {
