@@ -387,6 +387,10 @@ const driveFileSchema = z.object({
   trashed: z.boolean().optional(),
 }).passthrough();
 
+const modifiedLabelsSchema = z.array(
+  z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
+).optional();
+
 // Kept in lockstep with formatDriveFile: this mask must request exactly the
 // fields formatDriveFile reads. search_files and list_recent_files share it so
 // adding a field is a one-place change
@@ -1482,9 +1486,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       set_file_label: {
         description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, integer, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. User-type fields cannot be set, and single fields cannot be unset; use remove_file_label to strip a whole label. The label and its fields must already exist and be published; label_id and field_id come from the Drive admin or from get_file_metadata results (labels).',
         outputSchema: {
-          modifiedLabels: z.array(
-            z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
-          ).optional(),
+          modifiedLabels: modifiedLabelsSchema,
           message: z.string(),
         },
         schema: {
@@ -1501,19 +1503,13 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id, fields }: any, context: any) => {
           const { accessToken } = context;
 
-          let labelModification: Record<string, unknown>;
           try {
-            labelModification = buildLabelModification(label_id, fields ?? []);
-          } catch (err) {
-            return formatDriveError(err);
-          }
-
-          try {
-            const result = await modifyFileLabels(file_id, accessToken, labelModification);
-            const output = {
-              modifiedLabels: Array.isArray(result.modifiedLabels) ? result.modifiedLabels : [],
-              message: 'Label set successfully',
-            };
+            const modifiedLabels = await modifyFileLabels(
+              file_id,
+              accessToken,
+              buildLabelModification(label_id, fields ?? [])
+            );
+            const output = { modifiedLabels, message: 'Label set successfully' };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,
@@ -1528,9 +1524,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         description: 'Remove a Google Drive label from a file entirely, discarding its field values (re-applying needs them supplied again). Counterpart to set_file_label.',
         destructiveHint: true,
         outputSchema: {
-          modifiedLabels: z.array(
-            z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
-          ).optional(),
+          modifiedLabels: modifiedLabelsSchema,
           message: z.string(),
         },
         schema: {
@@ -1541,8 +1535,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const { accessToken } = context;
 
           try {
-            const result = await modifyFileLabels(file_id, accessToken, { labelId: label_id, removeLabel: true });
-            const modifiedLabels = Array.isArray(result.modifiedLabels) ? result.modifiedLabels : [];
+            const modifiedLabels = await modifyFileLabels(file_id, accessToken, { labelId: label_id, removeLabel: true });
             const output = {
               modifiedLabels,
               message: modifiedLabels.length

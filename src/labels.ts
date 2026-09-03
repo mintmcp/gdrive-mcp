@@ -275,7 +275,7 @@ export async function modifyFileLabels(
   fileId: string,
   accessToken: string,
   labelModification: Record<string, unknown>
-): Promise<Record<string, unknown>> {
+): Promise<Array<Record<string, unknown>>> {
   const result = await makeDriveRequest(
     `/files/${encodeURIComponent(fileId)}/modifyLabels`,
     accessToken,
@@ -289,5 +289,6 @@ export async function modifyFileLabels(
   if (result === null || typeof result !== 'object') {
     throw new Error(`modifyLabels returned an unexpected response: ${String(result).slice(0, 200)}`);
   }
-  return result;
+  // Google omits empty arrays, so a missing key is a legitimate no-op
+  return Array.isArray(result.modifiedLabels) ? result.modifiedLabels : [];
 }
