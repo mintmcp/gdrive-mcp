@@ -2,7 +2,7 @@ import { makeDriveRequest } from './driveApi.js';
 import { grantedScopes, SCOPES } from './scopes.js';
 
 const DRIVE_LABELS_API = 'https://drivelabels.googleapis.com/v2';
-const MAX_LABEL_PAGES = 10; // 1000 labels at maxResults=100, far above Drive's per-file limit
+const MAX_LABEL_PAGES = 10; // caps per-file listLabels and taxonomy listing at 1000 labels (100 per page)
 const MAX_TEXT_LABEL_CHARS = 256; // text fields are free form, cap what reaches the consumer
 
 export type LabelChoices = Record<string, Record<string, string>>;

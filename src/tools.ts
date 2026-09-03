@@ -1485,6 +1485,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
       list_labels: {
         description: 'List the published Google Drive labels visible to the user: label ids, titles, and each field\'s id, type (date, text, integer, selection, or user), and selection choices. Use this to discover the label_id, field_id, and choice ids that set_file_label and remove_file_label need. Read-only and file-independent; does not say which files carry a label.',
+        readOnlyHint: true,
         outputSchema: {
           labels: z.array(z.object({
             labelId: z.string().optional(),
