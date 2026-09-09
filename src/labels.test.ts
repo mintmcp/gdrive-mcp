@@ -346,3 +346,14 @@ describe('listAvailableLabels', () => {
     expect(res.truncated).toBe(true);
   });
 });
+
+describe('listAvailableLabels response guards', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('rejects a non-object 2xx body instead of reporting an empty taxonomy', async () => {
+    stubFetch([['drivelabels.googleapis.com', () =>
+      new Response('<html>gateway</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+    ]]);
+    await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
+  });
+});

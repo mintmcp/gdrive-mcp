@@ -16,7 +16,10 @@
   live: false
   profile: labels # standard + drive.labels.readonly
 
-# label-write-enabled connector: flip live to true once the Fly app exists
+# label-write-enabled connector: flip live to true once the Fly app exists.
+# Do NOT go live without the write-grant gate middleware attached and an
+# approval rule on set_file_label: without them label writes are ungated and
+# drive.metadata widens update/move/trash to every user-accessible file
 - app: gdrive-mintmcp-labels-write
   env: prod
   live: false

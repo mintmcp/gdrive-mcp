@@ -81,7 +81,10 @@ is returned; absence means "surfacing not enabled", never "no labels".
 `drive.metadata` (full `drive` implies it, so the `full` profile gets them
 too). The connector never interprets labels; which label means
 what is policy, decided elsewhere. Note `drive.file` is NOT enough here: it
-403s on files the app did not create.
+403s on files the app did not create. `drive.metadata` also widens three
+existing metadata tools (`update_file_metadata`, `move_file`, `trash_file`)
+to every file the user can access, not just app-created ones, so pair any
+`labels-write` deployment with gateway-side write gating before going live.
 
 Date, text, integer and selection fields are writable; `user` fields are not
 (PII, matching the read side withholding them), and there is no per-field
@@ -90,8 +93,14 @@ unset — `remove_file_label` strips the whole label.
 Label creation and publishing stay a one-time Workspace-admin action outside
 the connector; `list_labels` surfaces the published taxonomy so callers can
 discover `label_id` / `field_id` (both server-assigned).
-Platform approval rules can gate `set_file_label` while leaving
-`remove_file_label` ungated — revoking is always safe.
+In a write-gated deployment a platform approval rule on `set_file_label`
+is a required component, not an option: the gate trusts the grant label, so
+the tool that applies it must be human-approved. `remove_file_label` can
+stay ungated for the write-grant label (revoking a grant only reduces
+access), but removing classification or retention labels is a governance
+change — gate it like any write where that matters. Labels can propagate
+through `copy_file` (live-verified), so review the grant label's copy
+behavior in the label manager.
 
 ## Profiles
 

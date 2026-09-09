@@ -25,8 +25,8 @@ export const PROFILES: Record<string, readonly string[]> = {
 // Google's scope hierarchy, not our policy: full drive is a superset of the
 // narrow scopes. Never add an implication Google doesn't grant
 const IMPLIES: Record<string, readonly string[]> = {
-  // files.modifyLabels docs list drive, drive.file and drive.metadata as
-  // interchangeable grants, so full drive covers the metadata scope too
+  // full drive is a strict superset of drive.metadata in Google's scope
+  // hierarchy; the per-method grant lists (e.g. files.modifyLabels) agree
   [SCOPES.DRIVE]: [SCOPES.DRIVE_FILE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE_METADATA],
 };
 

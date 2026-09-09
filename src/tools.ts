@@ -1523,6 +1523,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
       set_file_label: {
         description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, integer, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. User-type fields cannot be set, and single fields cannot be unset; use remove_file_label to strip a whole label. The label and its fields must already exist and be published; discover label_id and field_id with list_labels, or from get_file_metadata results (labels).',
+        destructiveHint: true,
         outputSchema: {
           modifiedLabels: modifiedLabelsSchema,
           message: z.string(),
@@ -1547,7 +1548,12 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               accessToken,
               buildLabelModification(label_id, fields ?? [])
             );
-            const output = { modifiedLabels, message: 'Label set successfully' };
+            const output = {
+              modifiedLabels,
+              message: modifiedLabels.some((l) => (l as Record<string, unknown>).id === label_id)
+                ? 'Label set successfully'
+                : 'Drive accepted the request but did not echo the label; verify with get_file_metadata',
+            };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,
