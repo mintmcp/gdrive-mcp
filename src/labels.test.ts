@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getLabelInfo, getFileLabels, buildLabelModification, listAvailableLabels } from './labels.js';
+import { getLabelInfo, getFileLabels, buildLabelModification, listAvailableLabels, fetchLabelsMeta } from './labels.js';
 import { stubFetch, jsonResponse, LABEL_SCHEMA_BODY } from './testStubs.js';
 
 describe('getLabelInfo', () => {
@@ -356,5 +356,15 @@ describe('listAvailableLabels', () => {
   it('rejects an empty 2xx body the same way', async () => {
     stubFetch([['drivelabels.googleapis.com', () => new Response('', { status: 200 })]]);
     await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
+  });
+});
+
+describe('fetchLabelsMeta never rejects', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a malformed label wire degrades to labelsError instead of rejecting', async () => {
+    stubFetch([['listLabels', () => jsonResponse({ labels: [null] })]]);
+    const meta = await fetchLabelsMeta('f1', 'tok');
+    expect(meta).toEqual({ applied: [], labelsError: 'label read failed' });
   });
 });

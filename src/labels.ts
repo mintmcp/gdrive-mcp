@@ -200,10 +200,15 @@ export async function getFileLabels(
 export function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
   const granted = grantedScopes();
   if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
-  return getFileLabels(fileId, accessToken).then(({ applied, error }) => ({
-    applied,
-    ...(error ? { labelsError: error } : {}),
-  }));
+  return getFileLabels(fileId, accessToken)
+    .then(({ applied, error }) => ({
+      applied,
+      ...(error ? { labelsError: error } : {}),
+    }))
+    .catch((err) => {
+      console.warn(`fetchLabelsMeta: degraded fileId=${fileId} error=${err?.message}`);
+      return { applied: [], labelsError: 'label read failed' };
+    });
 }
 
 export type LabelTaxonomyField = {
