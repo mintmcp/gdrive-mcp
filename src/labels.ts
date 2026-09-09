@@ -257,8 +257,7 @@ export async function listAvailableLabels(
       `${DRIVE_LABELS_API}/labels?${params}`,
       accessToken
     ) as { labels?: WireLabel[]; nextPageToken?: string } | null;
-    // A non-JSON 2xx must not read as an authoritative empty taxonomy
-    if (data !== null && typeof data !== 'object') {
+    if (data === null || typeof data !== 'object') {
       throw new Error(`labels.list returned an unexpected response: ${String(data).slice(0, 200)}`);
     }
 
@@ -367,7 +366,6 @@ export async function modifyFileLabels(
       body: JSON.stringify({ labelModifications: [labelModification] }),
     }
   );
-  // A 2xx with an empty or non-JSON body must not read as a clean no-op
   if (result === null || typeof result !== 'object') {
     throw new Error(`modifyLabels returned an unexpected response: ${String(result).slice(0, 200)}`);
   }

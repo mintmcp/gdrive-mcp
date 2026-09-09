@@ -345,15 +345,16 @@ describe('listAvailableLabels', () => {
     expect(res.labels).toHaveLength(10);
     expect(res.truncated).toBe(true);
   });
-});
-
-describe('listAvailableLabels response guards', () => {
-  afterEach(() => vi.unstubAllGlobals());
 
   it('rejects a non-object 2xx body instead of reporting an empty taxonomy', async () => {
     stubFetch([['drivelabels.googleapis.com', () =>
       new Response('<html>gateway</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
     ]]);
+    await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
+  });
+
+  it('rejects an empty 2xx body the same way', async () => {
+    stubFetch([['drivelabels.googleapis.com', () => new Response('', { status: 200 })]]);
     await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
   });
 });

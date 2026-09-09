@@ -1550,7 +1550,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             );
             const output = {
               modifiedLabels,
-              message: modifiedLabels.some((l) => (l as Record<string, unknown>).id === label_id)
+              message: modifiedLabels.some((l) => l.id === label_id)
                 ? 'Label set successfully'
                 : 'Drive accepted the request but did not echo the label; verify with get_file_metadata',
             };
