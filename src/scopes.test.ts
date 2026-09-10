@@ -30,10 +30,21 @@ describe("grantedScopes", () => {
     expect(granted).toEqual(new Set([SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE]));
   });
 
+  test("labels-write adds the metadata scope for label writes", () => {
+    const granted = grantedScopes("labels-write");
+    expect(granted).toEqual(new Set([
+      SCOPES.DRIVE_READONLY,
+      SCOPES.DRIVE_FILE,
+      SCOPES.DRIVE_LABELS_READONLY,
+      SCOPES.DRIVE_METADATA,
+    ]));
+  });
+
   test("expands implied scopes, so full covers the narrow grants", () => {
     const granted = grantedScopes("full");
     expect(granted?.has(SCOPES.DRIVE_FILE)).toBe(true);
     expect(granted?.has(SCOPES.DRIVE_READONLY)).toBe(true);
+    expect(granted?.has(SCOPES.DRIVE_METADATA)).toBe(true);
   });
 
   test("an unknown profile fails at boot, not silently serving every tool", () => {
@@ -60,7 +71,7 @@ function toolNames(granted: Set<string> | null): string[] {
   return Object.keys((server as any)._registeredTools ?? {}).sort();
 }
 
-const ALL_TOOLS = [
+const CORE_TOOLS = [
   "copy_file",
   "create_folder",
   "get_file",
@@ -75,13 +86,24 @@ const ALL_TOOLS = [
   "upload_file",
 ].sort();
 
+const ALL_TOOLS = [...CORE_TOOLS, "list_labels", "remove_file_label", "set_file_label"].sort();
+
 describe("createServer tool surface", () => {
   test("unrestricted registers every tool", () => {
     expect(toolNames(null)).toEqual(ALL_TOOLS);
   });
 
-  test("the standard profile registers every tool", () => {
-    expect(toolNames(grantedScopes("standard"))).toEqual(ALL_TOOLS);
+  test("the standard profile registers the core tools but no label writes", () => {
+    expect(toolNames(grantedScopes("standard"))).toEqual(CORE_TOOLS);
+  });
+
+  test("the labels profile registers taxonomy discovery but no label writes", () => {
+    expect(toolNames(grantedScopes("labels")))
+      .toEqual([...CORE_TOOLS, "list_labels"].sort());
+  });
+
+  test("labels-write registers every tool, the label writes included", () => {
+    expect(toolNames(grantedScopes("labels-write"))).toEqual(ALL_TOOLS);
   });
 
   test("the full profile registers every tool, via the implication map", () => {
@@ -106,6 +128,10 @@ describe("createServer tool surface", () => {
   });
 
   test("a grant covering nothing registers nothing", () => {
-    expect(toolNames(expandScopes([SCOPES.DRIVE_LABELS_READONLY]))).toEqual([]);
+    expect(toolNames(expandScopes([]))).toEqual([]);
+  });
+
+  test("labels.readonly alone registers only taxonomy discovery", () => {
+    expect(toolNames(expandScopes([SCOPES.DRIVE_LABELS_READONLY]))).toEqual(["list_labels"]);
   });
 });

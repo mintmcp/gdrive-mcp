@@ -451,6 +451,149 @@ describe('decodeUploadContent on large payloads', () => {
 });
 
 
+describe('list_labels handler', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const tools = GoogleDriveTools.getTools() as any;
+  const call = (args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () => tools.list_labels.handler(args));
+
+  it('lists published labels with fields and choices', async () => {
+    const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse({
+      labels: [{
+        id: 'lbl1', properties: { title: 'Classification' },
+        fields: [{ id: 'f1', selectionOptions: { choices: [{ id: 'c1', properties: { displayName: 'Secret' } }] } }],
+      }],
+    })]]);
+    const res = await call({});
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].url).toContain('publishedOnly=true');
+    expect(res.structuredContent.labels).toEqual([{
+      labelId: 'lbl1', title: 'Classification',
+      fields: [{ fieldId: 'f1', type: 'selection', choices: [{ choiceId: 'c1', displayName: 'Secret' }] }],
+    }]);
+    expect(res.structuredContent.message).toMatch(/1 published label/);
+  });
+
+  it('passes API errors through formatDriveError', async () => {
+    stubFetch([['drivelabels.googleapis.com', () => jsonResponse({ error: { message: 'denied' } }, 403)]]);
+    const res = await call({});
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).status).toBe(403);
+  });
+});
+
+describe('set_file_label / remove_file_label handlers', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const tools = GoogleDriveTools.getTools() as any;
+  const call = (tool: string, args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () => tools[tool].handler(args));
+
+  it('POSTs modifyLabels with the built fieldModifications', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lbl1', revisionId: 'rev7' }] })],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', date_value: '2026-08-30' }],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].url).toContain('/files/f1/modifyLabels');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{
+        labelId: 'lbl1',
+        fieldModifications: [{ fieldId: 'fld1', setDateValues: ['2026-08-30'] }],
+      }],
+    });
+    expect(res.structuredContent.modifiedLabels).toEqual([{ id: 'lbl1', revisionId: 'rev7' }]);
+  });
+
+  it('applies a field-less badge label with no fieldModifications in the body', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lblBadge' }] })],
+    ]);
+    const res = await call('set_file_label', { file_id: 'f1', label_id: 'lblBadge' });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{ labelId: 'lblBadge' }],
+    });
+  });
+
+  it('treats an explicit empty fields array like omitted fields', async () => {
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [{ id: 'lblBadge' }] })],
+    ]);
+    const res = await call('set_file_label', { file_id: 'f1', label_id: 'lblBadge', fields: [] });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{ labelId: 'lblBadge' }],
+    });
+  });
+
+  it('rejects a non-object 2xx body instead of reporting success', async () => {
+    stubFetch([
+      ['modifyLabels', () => new Response('<html>gateway</html>', { status: 200, headers: { 'Content-Type': 'text/html' } })],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', text_values: ['x'] }],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/unexpected response/);
+  });
+
+  it('returns a tool error without calling the API on invalid fields', async () => {
+    const calls = stubFetch([]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1' }],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/exactly one of/);
+    expect(calls.length).toBe(0);
+  });
+
+  it('passes API errors through formatDriveError', async () => {
+    stubFetch([
+      ['modifyLabels', () => jsonResponse({ error: { message: 'The user has not granted the app...' } }, 403)],
+    ]);
+    const res = await call('set_file_label', {
+      file_id: 'f1',
+      label_id: 'lbl1',
+      fields: [{ field_id: 'fld1', text_values: ['x'] }],
+    });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).status).toBe(403);
+  });
+
+  it('POSTs modifyLabels with removeLabel and states the ensure-absent outcome', async () => {
+    // Live-verified: Drive returns modifiedLabels [] for removals whether or
+    // not the label was applied, so the message states the post-condition
+    const calls = stubFetch([
+      ['modifyLabels', () => jsonResponse({ modifiedLabels: [] })],
+    ]);
+    const res = await call('remove_file_label', { file_id: 'f1', label_id: 'lbl1' });
+    expect(res.isError).toBeUndefined();
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      labelModifications: [{ labelId: 'lbl1', removeLabel: true }],
+    });
+    expect(res.structuredContent.message).toMatch(/no longer carries/i);
+  });
+
+  it('passes remove API errors through formatDriveError', async () => {
+    stubFetch([
+      ['modifyLabels', () => jsonResponse({ error: { message: 'not found' } }, 404)],
+    ]);
+    const res = await call('remove_file_label', { file_id: 'f1', label_id: 'nope' });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).status).toBe(404);
+  });
+});
+
 describe('get_file handler _meta', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

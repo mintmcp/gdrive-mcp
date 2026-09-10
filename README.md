@@ -23,8 +23,11 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
 - `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
-  the `labels` and `full` profiles; enables `get_file`'s label
+  the `labels`, `labels-write` and `full` profiles; enables `get_file`'s label
   enrichment (see [Drive label enrichment](#drive-label-enrichment))
+- `https://www.googleapis.com/auth/drive.metadata` — optional, only in the
+  `labels-write` profile; enables `set_file_label` /
+  `remove_file_label` (see [Label write tools](#label-write-tools))
 
 ## Tools
 
@@ -42,6 +45,9 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
 |                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
 | Upload          | `upload_file`          | Text or base64 content; optional convert to a Google type. |
+| Labels          | `list_labels`          | Published label taxonomy: label/field/choice ids.          |
+|                 | `set_file_label`       | Apply/update a label's date, text, integer, or selection values. |
+|                 | `remove_file_label`    | Strip a label (and its values) from a file.                |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
 results (metadata, IDs, search hits, text file bodies) return
@@ -68,6 +74,34 @@ are human overlays. `_meta.labelsError` flags a failed read or resolution.
 Without the scope, the label API calls are skipped entirely and no `_meta`
 is returned; absence means "surfacing not enabled", never "no labels".
 
+### Label write tools
+
+`set_file_label` / `remove_file_label` are generic wrappers over Drive
+`files.modifyLabels`, registered only when the grant includes
+`drive.metadata` (full `drive` implies it, so the `full` profile gets them
+too). The connector never interprets labels; which label means
+what is policy, decided elsewhere. Note `drive.file` is NOT enough here: it
+403s on files the app did not create. `drive.metadata` also widens three
+existing metadata tools (`update_file_metadata`, `move_file`, `trash_file`)
+to every file the user can access, not just app-created ones, so pair any
+`labels-write` deployment with gateway-side write gating before going live.
+
+Date, text, integer and selection fields are writable; `user` fields are not
+(PII, matching the read side withholding them), and there is no per-field
+unset — `remove_file_label` strips the whole label.
+
+Label creation and publishing stay a one-time Workspace-admin action outside
+the connector; `list_labels` surfaces the published taxonomy so callers can
+discover `label_id` / `field_id` (both server-assigned).
+In a write-gated deployment a platform approval rule on `set_file_label`
+is a required component, not an option: the gate trusts the grant label, so
+the tool that applies it must be human-approved. `remove_file_label` can
+stay ungated for the write-grant label (revoking a grant only reduces
+access), but removing classification or retention labels is a governance
+change — gate it like any write where that matters. Labels can propagate
+through `copy_file` (live-verified), so review the grant label's copy
+behavior in the label manager.
+
 ## Profiles
 
 A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
@@ -76,7 +110,8 @@ a connector's contract with its users:
 | Profile           | Scopes                                                    |
 |-------------------|-----------------------------------------------------------|
 | `standard`        | `drive.readonly` + `drive.file`                           |
-| `labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `labels`          | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
+| `labels-write`    | `drive.readonly` + `drive.file` + `drive.labels.readonly` + `drive.metadata` |
 | `full`            | `drive` + `drive.labels.readonly`                         |
 
 Each tool declares the Google scope it needs (the first argument to
@@ -86,7 +121,8 @@ Each tool declares the Google scope it needs (the first argument to
 |-------------------------|---------------------------------------------------------|
 | `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
-| `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
+| `drive.labels.readonly` | `list_labels`, plus `get_file` label enrichment (`_meta.applied`) |
+| `drive.metadata`        | `set_file_label`, `remove_file_label`                   |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
@@ -136,7 +172,7 @@ curl -s -X POST http://localhost:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Authorization: Bearer fake-token" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
-# lists the tools the active profile registers (all 12 when PROFILE is unset)
+# lists the tools the active profile registers (all of them when PROFILE is unset)
 ```
 
 A fake token returns a structured 401 from the Drive API (with a "reconnect

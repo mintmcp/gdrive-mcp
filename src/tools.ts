@@ -1,13 +1,9 @@
-/**
- * Google Drive MCP Tools
- */
-
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
-import { fetchLabelsMeta } from './labels.js';
+import { fetchLabelsMeta, buildLabelModification, modifyFileLabels, listAvailableLabels } from './labels.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
@@ -387,6 +383,10 @@ const driveFileSchema = z.object({
   trashed: z.boolean().optional(),
 }).passthrough();
 
+const modifiedLabelsSchema = z.array(
+  z.object({ id: z.string().optional(), revisionId: z.string().optional() }).passthrough()
+).optional();
+
 // Kept in lockstep with formatDriveFile: this mask must request exactly the
 // fields formatDriveFile reads. search_files and list_recent_files share it so
 // adding a field is a one-place change
@@ -481,7 +481,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             // contain an `or` at top level.
             let effectiveQuery = query;
             if (mime_type) {
-              // Single-quote-escape mime_type per Drive q grammar.
               const safeMime = escapeDriveQValue(String(mime_type));
               effectiveQuery = query && query.trim().length > 0
                 ? `(${query}) and mimeType = '${safeMime}'`
@@ -530,7 +529,6 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               throw error;
             }
 
-            // Format the response
             const files = result.files || [];
             const formattedFiles = files.map(formatDriveFile);
 
@@ -1468,6 +1466,125 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               modifiedTime: result.modifiedTime,
               webViewLink: result.webViewLink,
               message: 'File updated successfully',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      list_labels: {
+        description: 'List the published Google Drive labels visible to the user: label ids, titles, and each field\'s id, type (date, text, integer, selection, or user), and selection choices. Use this to discover the label_id, field_id, and choice ids that set_file_label and remove_file_label need. Read-only and file-independent; does not say which files carry a label.',
+        readOnlyHint: true,
+        outputSchema: {
+          labels: z.array(z.object({
+            labelId: z.string().optional(),
+            revisionId: z.string().optional(),
+            title: z.string().optional(),
+            fields: z.array(z.object({
+              fieldId: z.string().optional(),
+              type: z.string().optional(),
+              displayName: z.string().optional(),
+              choices: z.array(z.object({
+                choiceId: z.string().optional(),
+                displayName: z.string().optional(),
+              }).passthrough()).optional(),
+            }).passthrough()).optional(),
+          }).passthrough()),
+          truncated: z.boolean().optional(),
+          message: z.string(),
+        },
+        schema: {},
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.labels.readonly", async (_args: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const { labels, truncated } = await listAvailableLabels(accessToken);
+            const output = {
+              labels,
+              ...(truncated ? { truncated: true } : {}),
+              message: labels.length
+                ? `${labels.length} published label(s) visible to this user`
+                : 'No published labels are visible to this user',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      set_file_label: {
+        description: 'Apply a Google Drive label to a file, or update the label\'s field values (date, text, integer, or selection choices). Labels are Workspace metadata used for classification and policy; this tool is generic and does not interpret them. Omit fields to apply a label that has no fields. User-type fields cannot be set, and single fields cannot be unset; use remove_file_label to strip a whole label. The label and its fields must already exist and be published; discover label_id and field_id with list_labels, or from get_file_metadata results (labels).',
+        destructiveHint: true,
+        outputSchema: {
+          modifiedLabels: modifiedLabelsSchema,
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file ID.'),
+          label_id: z.string().describe('ID of the published label to apply or update.'),
+          fields: z.array(z.object({
+            field_id: z.string().describe('Server-assigned field ID within the label.'),
+            date_value: z.string().optional().describe('Date field value, YYYY-MM-DD. Drive date fields are day-granular.'),
+            text_values: z.array(z.string()).optional().describe('Text field values.'),
+            integer_values: z.array(z.string()).optional().describe('Integer field values as decimal strings, e.g. "3".'),
+            selection_choice_ids: z.array(z.string()).optional().describe('Selection field choice IDs.'),
+          })).optional().describe('Exactly one value kind per field entry. Omit to apply a label with no fields.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id, fields }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const modifiedLabels = await modifyFileLabels(
+              file_id,
+              accessToken,
+              buildLabelModification(label_id, fields ?? [])
+            );
+            const output = {
+              modifiedLabels,
+              message: modifiedLabels.some((l) => l.id === label_id)
+                ? 'Label set successfully'
+                : 'Drive accepted the request but did not echo the label; verify with get_file_metadata',
+            };
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      remove_file_label: {
+        description: 'Remove a Google Drive label from a file entirely, discarding its field values (re-applying needs them supplied again). Counterpart to set_file_label.',
+        destructiveHint: true,
+        outputSchema: {
+          modifiedLabels: modifiedLabelsSchema,
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file ID.'),
+          label_id: z.string().describe('ID of the label to remove.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.metadata", async ({ file_id, label_id }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const modifiedLabels = await modifyFileLabels(file_id, accessToken, { labelId: label_id, removeLabel: true });
+            // Google echoes only set labels in modifiedLabels; removals return []
+            // whether or not the label was present, so state the post-condition
+            const output = {
+              modifiedLabels,
+              message: 'Label removed; the file no longer carries this label',
             };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],

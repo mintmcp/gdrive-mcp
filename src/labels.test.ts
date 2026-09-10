@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { getLabelInfo, getFileLabels } from './labels.js';
+import { getLabelInfo, getFileLabels, buildLabelModification, listAvailableLabels, fetchLabelsMeta } from './labels.js';
 import { stubFetch, jsonResponse, LABEL_SCHEMA_BODY } from './testStubs.js';
 
 describe('getLabelInfo', () => {
@@ -216,3 +216,155 @@ describe('getFileLabels', () => {
   });
 });
 
+
+describe('buildLabelModification', () => {
+  it('maps a date field to setDateValues', () => {
+    expect(buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-08-30' }]))
+      .toEqual({
+        labelId: 'lbl1',
+        fieldModifications: [{ fieldId: 'f1', setDateValues: ['2026-08-30'] }],
+      });
+  });
+
+  it('maps text, integer, and selection fields to their set arrays', () => {
+    expect(buildLabelModification('lbl1', [
+      { field_id: 'f1', text_values: ['a', 'b'] },
+      { field_id: 'f2', selection_choice_ids: ['c1'] },
+      { field_id: 'f3', integer_values: ['3', '-7'] },
+    ])).toEqual({
+      labelId: 'lbl1',
+      fieldModifications: [
+        { fieldId: 'f1', setTextValues: ['a', 'b'] },
+        { fieldId: 'f2', setSelectionValues: ['c1'] },
+        { fieldId: 'f3', setIntegerValues: ['3', '-7'] },
+      ],
+    });
+  });
+
+  it('rejects non-integer integer_values', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: ['3.5'] }]))
+      .toThrow(/whole numbers/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: ['abc'] }]))
+      .toThrow(/whole numbers/);
+  });
+
+  it('omits fieldModifications entirely for a label with no fields', () => {
+    expect(buildLabelModification('lbl1', [])).toEqual({ labelId: 'lbl1' });
+  });
+
+  it('rejects a field with no value kind', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1' }]))
+      .toThrow(/exactly one of/);
+  });
+
+  it('rejects a field with two value kinds', () => {
+    expect(() => buildLabelModification('lbl1', [
+      { field_id: 'f1', date_value: '2026-08-30', text_values: ['x'] },
+    ])).toThrow(/exactly one of/);
+  });
+
+  it('rejects a malformed or impossible date', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '30/08/2026' }]))
+      .toThrow(/YYYY-MM-DD/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-13-40' }]))
+      .toThrow(/YYYY-MM-DD/);
+    // V8 would silently normalize this to Mar 2
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', date_value: '2026-02-31' }]))
+      .toThrow(/YYYY-MM-DD/);
+  });
+
+  it('rejects empty value arrays', () => {
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', text_values: [] }]))
+      .toThrow(/empty/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', selection_choice_ids: [] }]))
+      .toThrow(/empty/);
+    expect(() => buildLabelModification('lbl1', [{ field_id: 'f1', integer_values: [] }]))
+      .toThrow(/empty/);
+  });
+});
+
+describe('listAvailableLabels', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('maps labels with typed fields and selection choices', async () => {
+    const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse({
+      labels: [
+        {
+          id: 'lblGrant', revisionId: '2', properties: { title: 'Write Grant' },
+          fields: [
+            { id: 'fDate', properties: { displayName: 'Allowed until' }, dateOptions: {} },
+            { id: 'fWho', properties: { displayName: 'Approver' }, userOptions: {} },
+          ],
+        },
+        {
+          id: 'lblClass', properties: { title: 'Classification' },
+          fields: [{
+            id: 'fLevel', selectionOptions: { choices: [
+              { id: 'cSecret', properties: { displayName: 'Secret' } },
+              { id: 'cOpen', properties: { displayName: 'Open' } },
+            ] },
+          }],
+        },
+        { id: 'lblBadge', properties: { title: 'Badge' } },
+      ],
+    })]]);
+    const res = await listAvailableLabels('tok');
+    expect(calls[0].url).toContain('/v2/labels?');
+    expect(calls[0].url).toContain('publishedOnly=true');
+    expect(res.truncated).toBe(false);
+    expect(res.labels).toEqual([
+      {
+        labelId: 'lblGrant', revisionId: '2', title: 'Write Grant',
+        fields: [
+          { fieldId: 'fDate', type: 'date', displayName: 'Allowed until' },
+          { fieldId: 'fWho', type: 'user', displayName: 'Approver' },
+        ],
+      },
+      {
+        labelId: 'lblClass', title: 'Classification',
+        fields: [{
+          fieldId: 'fLevel', type: 'selection',
+          choices: [
+            { choiceId: 'cSecret', displayName: 'Secret' },
+            { choiceId: 'cOpen', displayName: 'Open' },
+          ],
+        }],
+      },
+      { labelId: 'lblBadge', title: 'Badge', fields: [] },
+    ]);
+  });
+
+  it('follows pagination and flags the page cap as truncation', async () => {
+    let page = 0;
+    stubFetch([['drivelabels.googleapis.com', () => {
+      page += 1;
+      return jsonResponse({ labels: [{ id: `lbl${page}` }], nextPageToken: 'again' });
+    }]]);
+    const res = await listAvailableLabels('tok');
+    expect(page).toBe(10);
+    expect(res.labels).toHaveLength(10);
+    expect(res.truncated).toBe(true);
+  });
+
+  it('rejects a non-object 2xx body instead of reporting an empty taxonomy', async () => {
+    stubFetch([['drivelabels.googleapis.com', () =>
+      new Response('<html>gateway</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+    ]]);
+    await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
+  });
+
+  it('rejects an empty 2xx body the same way', async () => {
+    stubFetch([['drivelabels.googleapis.com', () => new Response('', { status: 200 })]]);
+    await expect(listAvailableLabels('tok')).rejects.toThrow(/unexpected response/);
+  });
+});
+
+describe('fetchLabelsMeta never rejects', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a malformed label wire degrades to labelsError instead of rejecting', async () => {
+    stubFetch([['listLabels', () => jsonResponse({ labels: [null] })]]);
+    const meta = await fetchLabelsMeta('f1', 'tok');
+    expect(meta).toEqual({ applied: [], labelsError: 'label read failed' });
+  });
+});

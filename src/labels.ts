@@ -2,7 +2,7 @@ import { makeDriveRequest } from './driveApi.js';
 import { grantedScopes, SCOPES } from './scopes.js';
 
 const DRIVE_LABELS_API = 'https://drivelabels.googleapis.com/v2';
-const MAX_LABEL_PAGES = 10; // 1000 labels at maxResults=100, far above Drive's per-file limit
+const MAX_LABEL_PAGES = 10; // caps per-file listLabels and taxonomy listing at 1000 labels (100 per page)
 const MAX_TEXT_LABEL_CHARS = 256; // text fields are free form, cap what reaches the consumer
 
 export type LabelChoices = Record<string, Record<string, string>>;
@@ -200,8 +200,180 @@ export async function getFileLabels(
 export function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
   const granted = grantedScopes();
   if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
-  return getFileLabels(fileId, accessToken).then(({ applied, error }) => ({
-    applied,
-    ...(error ? { labelsError: error } : {}),
-  }));
+  return getFileLabels(fileId, accessToken)
+    .then(({ applied, error }) => ({
+      applied,
+      ...(error ? { labelsError: error } : {}),
+    }))
+    .catch((err) => {
+      console.warn(`fetchLabelsMeta: degraded fileId=${fileId} error=${err?.message}`);
+      return { applied: [], labelsError: 'label read failed' };
+    });
+}
+
+export type LabelTaxonomyField = {
+  fieldId: string;
+  type: string;
+  displayName?: string;
+  choices?: Array<{ choiceId: string; displayName?: string }>;
+};
+
+export type LabelTaxonomyEntry = {
+  labelId: string;
+  revisionId?: string;
+  title?: string;
+  fields: LabelTaxonomyField[];
+};
+
+export async function listAvailableLabels(
+  accessToken: string
+): Promise<{ labels: LabelTaxonomyEntry[]; truncated: boolean }> {
+  type WireField = {
+    id?: string;
+    properties?: { displayName?: string };
+    selectionOptions?: { choices?: Array<{ id?: string; properties?: { displayName?: string } }> };
+    textOptions?: unknown;
+    dateOptions?: unknown;
+    integerOptions?: unknown;
+    userOptions?: unknown;
+  };
+  type WireLabel = {
+    id?: string;
+    revisionId?: string;
+    properties?: { title?: string };
+    fields?: WireField[];
+  };
+
+  const fieldType = (f: WireField): string => {
+    if (f.selectionOptions) return 'selection';
+    if (f.textOptions) return 'text';
+    if (f.dateOptions) return 'date';
+    if (f.integerOptions) return 'integer';
+    if (f.userOptions) return 'user';
+    return 'unknown';
+  };
+
+  const labels: LabelTaxonomyEntry[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_LABEL_PAGES; page++) {
+    const params = new URLSearchParams({ view: 'LABEL_VIEW_FULL', publishedOnly: 'true', pageSize: '100' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const data = await makeDriveRequest(
+      `${DRIVE_LABELS_API}/labels?${params}`,
+      accessToken
+    ) as { labels?: WireLabel[]; nextPageToken?: string } | null;
+    if (data === null || typeof data !== 'object') {
+      throw new Error(`labels.list returned an unexpected response: ${String(data).slice(0, 200)}`);
+    }
+
+    for (const label of data?.labels || []) {
+      if (!label.id) continue;
+      labels.push({
+        labelId: label.id,
+        ...(label.revisionId ? { revisionId: label.revisionId } : {}),
+        ...(label.properties?.title ? { title: label.properties.title } : {}),
+        fields: (label.fields || []).flatMap((f) => f.id === undefined ? [] : [{
+          fieldId: f.id,
+          type: fieldType(f),
+          ...(f.properties?.displayName ? { displayName: f.properties.displayName } : {}),
+          ...(f.selectionOptions ? {
+            choices: (f.selectionOptions.choices || []).flatMap((c) => c.id === undefined ? [] : [{
+              choiceId: c.id,
+              ...(c.properties?.displayName ? { displayName: c.properties.displayName } : {}),
+            }]),
+          } : {}),
+        }]),
+      });
+    }
+
+    pageToken = data?.nextPageToken;
+    if (!pageToken) return { labels, truncated: false };
+  }
+  return { labels, truncated: true };
+}
+
+export type LabelFieldInput = {
+  field_id: string;
+  date_value?: string;
+  text_values?: string[];
+  integer_values?: string[];
+  selection_choice_ids?: string[];
+};
+
+/**
+ * Validate tool input and build a files.modifyLabels LabelModification.
+ * Throws with a caller-actionable message so bad input becomes a tool
+ * error before any API call. Empty fields applies the bare label: the
+ * API wants fieldModifications absent, not [], for that
+ */
+export function buildLabelModification(labelId: string, fields: LabelFieldInput[]): Record<string, unknown> {
+  const fieldModifications = fields.map((f) => {
+    const kinds = [f.date_value, f.text_values, f.integer_values, f.selection_choice_ids]
+      .filter((v) => v !== undefined).length;
+    if (kinds !== 1) {
+      throw new Error(
+        `field '${f.field_id}': provide exactly one of date_value, text_values, integer_values, selection_choice_ids (user fields cannot be set by this tool)`
+      );
+    }
+    if (f.date_value !== undefined) {
+      // Date round-trips through ISO because V8 normalizes impossible days
+      // (2026-02-31 parses as Mar 3 UTC) instead of rejecting them
+      const parsed = new Date(`${f.date_value}T00:00:00Z`);
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(f.date_value) ||
+        Number.isNaN(parsed.getTime()) ||
+        parsed.toISOString().slice(0, 10) !== f.date_value
+      ) {
+        throw new Error(`field '${f.field_id}': date_value must be a valid YYYY-MM-DD date`);
+      }
+      return { fieldId: f.field_id, setDateValues: [f.date_value] };
+    }
+    if (f.text_values !== undefined) {
+      if (f.text_values.length === 0) {
+        throw new Error(`field '${f.field_id}': text_values must not be empty`);
+      }
+      return { fieldId: f.field_id, setTextValues: f.text_values };
+    }
+    if (f.integer_values !== undefined) {
+      if (f.integer_values.length === 0) {
+        throw new Error(`field '${f.field_id}': integer_values must not be empty`);
+      }
+      for (const v of f.integer_values) {
+        if (!/^-?\d+$/.test(v)) {
+          throw new Error(`field '${f.field_id}': integer_values entries must be whole numbers, got '${v}'`);
+        }
+      }
+      return { fieldId: f.field_id, setIntegerValues: f.integer_values };
+    }
+    const choiceIds = f.selection_choice_ids ?? [];
+    if (choiceIds.length === 0) {
+      throw new Error(`field '${f.field_id}': selection_choice_ids must not be empty`);
+    }
+    return { fieldId: f.field_id, setSelectionValues: choiceIds };
+  });
+  return {
+    labelId,
+    ...(fieldModifications.length ? { fieldModifications } : {}),
+  };
+}
+
+export async function modifyFileLabels(
+  fileId: string,
+  accessToken: string,
+  labelModification: Record<string, unknown>
+): Promise<Array<Record<string, unknown>>> {
+  const result = await makeDriveRequest(
+    `/files/${encodeURIComponent(fileId)}/modifyLabels`,
+    accessToken,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labelModifications: [labelModification] }),
+    }
+  );
+  if (result === null || typeof result !== 'object') {
+    throw new Error(`modifyLabels returned an unexpected response: ${String(result).slice(0, 200)}`);
+  }
+  // Google omits empty arrays, so a missing key is a legitimate no-op
+  return Array.isArray(result.modifiedLabels) ? result.modifiedLabels : [];
 }

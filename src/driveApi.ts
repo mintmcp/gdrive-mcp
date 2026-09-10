@@ -42,7 +42,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
       break;
     case 403:
       hint = reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded'
-        ? 'Rate limited by Google. Retried already — back off and try again later.'
+        ? 'Rate limited by Google. Back off and try again later.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:
@@ -54,7 +54,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
     case 503:
     case 502:
     case 504:
-      hint = 'Drive is temporarily unavailable. Retried already — try again shortly.';
+      hint = 'Drive is temporarily unavailable. Try again shortly.';
       break;
   }
 
@@ -136,7 +136,6 @@ export async function makeDriveRequest(
       try {
         return JSON.parse(text);
       } catch {
-        // non-JSON body on a 2xx, return the raw text
         return text;
       }
     }
