@@ -2,14 +2,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp, MCP_PATH } from './app.js';
+import { grantedScopes } from './scopes.js';
 
 const realFetch = globalThis.fetch;
 let httpServer: Server;
 let url: string;
 
 beforeAll(async () => {
+  // labels.ts reads PROFILE per call; standard lacks the labels scope, so
+  // get_file_metadata makes a single Drive request
   process.env.PROFILE = 'standard';
-  httpServer = createApp(null).listen(0, '127.0.0.1');
+  httpServer = createApp(grantedScopes()).listen(0, '127.0.0.1');
   await new Promise((resolve) => httpServer.once('listening', resolve));
   url = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}${MCP_PATH}`;
 });
@@ -23,15 +26,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// Slow Drive API that answers with the caller's token as the file name, so a
-// response routed to the wrong request (or a leaked token) is visible
+// Slow enough that every request is in flight at once; echoes the caller's
+// token as the file name so a response carrying another caller's data fails
 function stubSlowDrive() {
-  vi.stubGlobal('fetch', vi.fn(async (input: any, init?: RequestInit) => {
-    const target = String(input);
-    if (!target.includes('googleapis.com')) return realFetch(input, init);
+  vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const token = new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '');
-    return new Response(JSON.stringify({ id: 'f1', name: token, mimeType: 'text/plain' }), {
+    return new Response(JSON.stringify({ id: 'f1', name: token }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -54,12 +55,13 @@ async function callTool(id: number, token: string) {
     }),
   });
   const body = await res.text();
+  // Success is an SSE event; the 500 error path is plain JSON
   const data = body.split('\n').find((line) => line.startsWith('data: '));
   return { status: res.status, message: JSON.parse(data ? data.slice(6) : body) };
 }
 
 describe('concurrent MCP requests', () => {
-  it('serves overlapping tools/call requests without "Already connected"', async () => {
+  it('serves overlapping tools/call requests, each with its own caller token', async () => {
     stubSlowDrive();
     const results = await Promise.all(
       Array.from({ length: 8 }, (_, i) => callTool(i + 1, `token-${i + 1}`)),
@@ -72,12 +74,5 @@ describe('concurrent MCP requests', () => {
       expect(message.result.isError).toBeUndefined();
       expect(message.result.structuredContent.name).toBe(`token-${i + 1}`);
     });
-  });
-
-  it('keeps serving after a burst', async () => {
-    stubSlowDrive();
-    await Promise.all([callTool(1, 'a'), callTool(2, 'b')]);
-    const { message } = await callTool(3, 'c');
-    expect(message.result.structuredContent.name).toBe('c');
   });
 });

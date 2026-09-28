@@ -29,7 +29,6 @@ export function createApp(granted: Set<string> | null) {
     try {
       res.on("close", () => {
         transport.close().catch(() => {});
-        server.close().catch(() => {});
       });
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
