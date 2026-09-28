@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { grantedScopes, isToolGranted } from "./scopes.js";
+import { isToolGranted } from "./scopes.js";
 
 const SERVER_NAME = "Google Drive";
 const SERVER_VERSION = "2.0.0";
@@ -25,7 +25,7 @@ export function logToolSurface(granted: Set<string> | null): void {
   }
 }
 
-export function createServer(granted = grantedScopes()): McpServer {
+export function createServer(granted: Set<string> | null): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   for (const [toolName, t] of TOOLS) {
