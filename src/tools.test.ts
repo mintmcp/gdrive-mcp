@@ -579,13 +579,10 @@ describe('get_file handler _meta', () => {
 describe('copy_file handler', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const copyFile = (args: Record<string, unknown>) =>
-    requestContext.run({ accessToken: 'tok' }, () =>
-      (GoogleDriveTools.getTools() as any).copy_file.handler({ file_id: 'f1', ...args }));
-
   const copyQuery = async (args: Record<string, unknown>) => {
     const calls = stubFetch([['/files/f1/copy', () => jsonResponse({ id: 'f2', name: 'b', mimeType: 'text/plain' })]]);
-    const res = await copyFile(args);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).copy_file.handler({ file_id: 'f1', ...args }));
     expect(res.isError).toBeUndefined();
     return new URL(calls[0].url).searchParams;
   };

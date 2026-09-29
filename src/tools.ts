@@ -555,7 +555,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       copy_file: {
-        description: 'Duplicate a Drive file. Use this when the user asks to copy/duplicate a file, optionally renaming it or placing the copy in a specific folder. Set copy_comments to keep the open (unresolved) comments and suggestions of a Google Doc, Sheet or Slides file; Drive ignores it for other file types, and silently copies no comments if the user cannot read the source\'s comments. Copied comments do not give their authors access to the copy. Does NOT work for folders (Drive forbids folder copy); use create_folder + manual re-add for that case.',
+        description: 'Duplicate a Drive file. Use this when the user asks to copy/duplicate a file, optionally renaming it or placing the copy in a specific folder. Set copy_comments to keep the open (unresolved) comments and suggestions; if the user cannot read the source\'s comments, the copy still succeeds without them. Copied comments do not give their authors access to the copy. Does NOT work for folders (Drive forbids folder copy); use create_folder + manual re-add for that case.',
         outputSchema: {
           id: z.string(),
           name: z.string(),
@@ -571,7 +571,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           file_id: z.string().describe('ID of the file to copy'),
           name: z.string().optional().describe('New name for the copied file'),
           parent_folder_id: z.string().optional().describe('ID of the folder to place the copy in'),
-          copy_comments: z.boolean().optional().describe('Copy open comments and suggestions (Docs, Sheets, Slides only). Default false'),
+          copy_comments: z.boolean().optional().describe('Copy open comments and suggestions (Docs, Sheets, Slides only; ignored for other file types). Defaults to false.'),
         },
         handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, name, parent_folder_id, copy_comments }: any, context: any) => {
           const { accessToken } = context;
