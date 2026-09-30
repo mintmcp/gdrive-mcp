@@ -40,7 +40,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 |                 | `update_file_metadata` | Rename / set description / star; metadata only.            |
 |                 | `trash_file`           | Reversible move to trash (not a permanent delete).         |
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
-|                 | `copy_file`            | Optional rename + destination folder; not for folders.     |
+|                 | `copy_file`            | Rename, destination folder, `copy_comments`; not folders.  |
 | Upload          | `upload_file`          | Text or base64 content; optional convert to a Google type. |
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped

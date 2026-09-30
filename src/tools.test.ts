@@ -576,3 +576,23 @@ describe('get_file handler _meta', () => {
   });
 });
 
+describe('copy_file handler', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const copyQuery = async (args: Record<string, unknown>) => {
+    const calls = stubFetch([['/files/f1/copy', () => jsonResponse({ id: 'f2', name: 'b', mimeType: 'text/plain' })]]);
+    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).copy_file.handler({ file_id: 'f1', ...args }));
+    expect(res.isError).toBeUndefined();
+    return new URL(calls[0].url).searchParams;
+  };
+
+  it('asks Drive to copy comments when copy_comments is true', async () => {
+    expect((await copyQuery({ copy_comments: true })).get('copyComments')).toBe('true');
+  });
+
+  it('does not copy comments by default or when copy_comments is false', async () => {
+    expect((await copyQuery({})).get('copyComments')).toBe('false');
+    expect((await copyQuery({ copy_comments: false })).get('copyComments')).toBe('false');
+  });
+});
