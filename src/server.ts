@@ -25,6 +25,32 @@ export function logToolSurface(granted: Set<string> | null): void {
   }
 }
 
+// Handlers return failures as isError results, so without this a failed call
+// leaves no trace in the server logs. Args are left out: they carry user data
+export function logToolErrors<TArgs>(
+  toolName: string,
+  handler: (args: TArgs) => Promise<any>,
+): (args: TArgs) => Promise<any> {
+  return async (args) => {
+    try {
+      const result = await handler(args);
+      if (result?.isError) {
+        console.error(
+          `[gdrive-hosted] tool_error tool=${toolName} error=${result.content?.[0]?.text}`,
+        );
+      }
+      return result;
+    } catch (err) {
+      console.error(
+        `[gdrive-hosted] tool_error tool=${toolName} ` +
+          `thrown=${err instanceof Error ? err.name : typeof err} ` +
+          `error=${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
+  };
+}
+
 export function createServer(granted: Set<string> | null): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
@@ -42,7 +68,7 @@ export function createServer(granted: Set<string> | null): McpServer {
           destructiveHint: t.destructiveHint ?? false,
         },
       },
-      async (args: Record<string, unknown>) => t.handler(args),
+      logToolErrors(toolName, t.handler),
     );
   }
 

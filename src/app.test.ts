@@ -76,3 +76,24 @@ describe('concurrent MCP requests', () => {
     });
   });
 });
+
+describe('tool error logging', () => {
+  it('logs a failed tool call with its tool name and error, but not the caller token', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 404, message: 'File not found: secret-id.' } }),
+      { status: 404, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { message } = await callTool(1, 'token-1');
+
+    expect(message.result.isError).toBe(true);
+    const lines = logged.mock.calls.map((call) => call.join(' '));
+    logged.mockRestore();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\[gdrive-hosted\] tool_error tool=get_file_metadata /);
+    expect(lines[0]).toContain('"status":404');
+    expect(lines[0]).toContain('File not found');
+    expect(lines[0]).not.toContain('token-1');
+  });
+});
