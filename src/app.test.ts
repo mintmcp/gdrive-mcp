@@ -24,6 +24,7 @@ afterAll(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 // Slow enough that every request is in flight at once; echoes the caller's
@@ -89,7 +90,6 @@ describe('tool error logging', () => {
 
     expect(message.result.isError).toBe(true);
     const lines = logged.mock.calls.map((call) => call.join(' '));
-    logged.mockRestore();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^\[gdrive-hosted\] tool_error tool=get_file_metadata /);
     expect(lines[0]).toContain('"status":404');

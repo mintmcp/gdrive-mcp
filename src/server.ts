@@ -26,25 +26,26 @@ export function logToolSurface(granted: Set<string> | null): void {
 }
 
 // Handlers return failures as isError results, so without this a failed call
-// leaves no trace in the server logs. Args are left out: they carry user data
-export function logToolErrors<TArgs>(
+// leaves no trace in the server logs. Args aren't logged, but the error text
+// can still echo ids, file names or other caller input
+export function logToolErrors(
   toolName: string,
-  handler: (args: TArgs) => Promise<any>,
-): (args: TArgs) => Promise<any> {
+  handler: (args: unknown) => Promise<any>,
+): (args: unknown) => Promise<any> {
+  const log = (detail: string) =>
+    console.error(
+      `[gdrive-hosted] tool_error tool=${toolName} ${detail.replace(/\s+/g, " ").slice(0, 500)}`,
+    );
   return async (args) => {
     try {
       const result = await handler(args);
-      if (result?.isError) {
-        console.error(
-          `[gdrive-hosted] tool_error tool=${toolName} error=${result.content?.[0]?.text}`,
-        );
-      }
+      if (result?.isError) log(`error=${result.content?.[0]?.text}`);
       return result;
     } catch (err) {
-      console.error(
-        `[gdrive-hosted] tool_error tool=${toolName} ` +
-          `thrown=${err instanceof Error ? err.name : typeof err} ` +
-          `error=${err instanceof Error ? err.message : String(err)}`,
+      log(
+        err instanceof Error
+          ? `thrown=${err.name} error=${err.message}`
+          : `thrown=${typeof err} error=${String(err)}`,
       );
       throw err;
     }
