@@ -72,12 +72,68 @@ export function unsupportedMessage(name: string, mimeType: string, webViewLink: 
 
   const service = GOOGLE_NATIVE_SERVERS[mimeType];
   if (service) {
-    return `'${name}' is a ${service} file, which this connector cannot read. Use the ${service} MCP server to read its contents, or open it directly: ${webViewLink}`;
+    return `'${name}' is a ${service} file, which get_file cannot read. Use the ${service} MCP server to read its contents, export_file to export it (for example as Markdown or PDF), or open it directly: ${webViewLink}`;
   }
   if (mimeType.startsWith('application/vnd.google-apps.')) {
-    return `'${name}' is a Google Drive-native file ('${mimeType}') with no downloadable contents. Open it directly: ${webViewLink}`;
+    return `'${name}' is a Google Drive-native file ('${mimeType}'), which get_file cannot read. Drawings and Apps Script projects can be exported with export_file; otherwise open it directly: ${webViewLink}`;
   }
   return `File '${name}' has unsupported mimeType '${mimeType}'. This tool supports text, image and PDF files. Open it directly: ${webViewLink}`;
+}
+
+// Short names for Drive's export MIME types. A file's own exportLinks decide
+// which of them it accepts, so this only names formats and never gates them
+const EXPORT_FORMATS: Record<string, string> = {
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  odt: 'application/vnd.oasis.opendocument.text',
+  rtf: 'application/rtf',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  html: 'text/html',
+  epub: 'application/epub+zip',
+  zip: 'application/zip',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  csv: 'text/csv',
+  tsv: 'text/tab-separated-values',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  svg: 'image/svg+xml',
+  json: 'application/vnd.google-apps.script+json',
+};
+
+/**
+ * Resolve export_file's `format` (a short name such as "pdf", or a MIME type)
+ * against the file's exportLinks. An unavailable format lists the ones the
+ * file does accept, so the caller can retry without guessing
+ */
+export function resolveExportFormat(
+  format: string,
+  exportLinks: Record<string, string>,
+): { ok: true; mimeType: string; link: string } | { ok: false; error: string } {
+  const requested = format.trim().toLowerCase().replace(/^\./, '');
+  const mimeType = EXPORT_FORMATS[requested] ?? requested;
+  const link = exportLinks[mimeType];
+  if (link) return { ok: true, mimeType, link };
+
+  const names = Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n]));
+  const available = Object.keys(exportLinks).map((m) => names[m] ?? m);
+  return {
+    ok: false,
+    error: `format "${format}" is not available for this file. Available formats: ${available.join(', ')}.`,
+  };
+}
+
+/**
+ * How export_file returns an export: text the model can read, an image block,
+ * or an embedded resource for binary formats
+ */
+export function exportKind(mimeType: string): 'text' | 'image' | 'binary' {
+  if (mimeType.startsWith('text/') || mimeType === 'image/svg+xml' || mimeType.endsWith('+json')) return 'text';
+  if (mimeType.startsWith('image/')) return 'image';
+  return 'binary';
 }
 
 /**
@@ -833,7 +889,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       get_file: {
-        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. PDFs with a text layer are returned as readable text in `content`. Scanned/image-only PDFs have no text to extract: the result says so and carries `scanned: true` plus a `webViewLink` to open the file, rather than returning unreadable bytes. `extraction` tells you which branch produced the result. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use the dedicated MCP servers for those. Files over 20MB, unsupported mime types and Google-native docs are reported as tool errors, not results.',
+        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. PDFs with a text layer are returned as readable text in `content`. Scanned/image-only PDFs have no text to extract: the result says so and carries `scanned: true` plus a `webViewLink` to open the file, rather than returning unreadable bytes. `extraction` tells you which branch produced the result. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use export_file or the dedicated MCP servers for those. Files over 20MB, unsupported mime types and Google-native docs are reported as tool errors, not results.',
         readOnlyHint: true,
         outputSchema: {
           id: z.string().optional(),
@@ -998,6 +1054,88 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           }
           if (!labelsMeta) return result;
           return { ...result, _meta: await labelsMeta };
+        }),
+      },
+
+      export_file: {
+        description: 'Export a Google Doc, Sheet, Slides deck, Drawing or Apps Script project to another format, such as Markdown, PDF, DOCX, XLSX, CSV, PPTX or PNG. Use this for Google-native files, which get_file cannot read; use get_file for files stored as-is (PDFs, images, text). Which formats a file accepts depends on its type; asking for one it does not accept returns the list it does. Text formats (md, txt, csv, tsv, html, svg, json) return the text in `content`. PNG and JPEG return an image. Other formats (pdf, docx, xlsx, pptx, ...) return the file as an embedded resource whose uri is the export link, which the user can open to download it. A Sheet exports only its first sheet as csv or tsv, and a Slides deck only its first slide as png, jpg or svg. Google caps exports at 10MB.',
+        readOnlyHint: true,
+        outputSchema: {
+          id: z.string().optional(),
+          name: z.string().optional(),
+          mimeType: z.string().optional().describe('MIME type of the Drive file'),
+          webViewLink: z.string().optional(),
+          exportMimeType: z.string().optional().describe('MIME type of the export'),
+          size: z.number().optional().describe('Size of the export in bytes'),
+          exportLink: z.string().optional().describe('Link that downloads the export in a browser signed in to the account'),
+          content: z.string().optional().describe('The exported text, for text formats'),
+        },
+        schema: {
+          file_id: z.string().describe('The Google Drive file ID (from search_files).'),
+          format: z
+            .string()
+            .min(1)
+            .max(255)
+            .describe('Target format: pdf, docx, odt, rtf, txt, md, html, epub or zip for Docs; xlsx, ods, csv, tsv, pdf or zip for Sheets; pptx, odp, pdf, txt, png, jpg or svg for Slides; pdf, png, jpg or svg for Drawings; json for Apps Script. A full MIME type is also accepted.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ file_id, format }: any, context: any) => {
+          const { accessToken } = context;
+
+          try {
+            const meta = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,webViewLink,exportLinks&supportsAllDrives=true`,
+              accessToken
+            );
+            const name: string = meta.name || '';
+            const mimeType: string = meta.mimeType || '';
+            const webViewLink: string =
+              meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
+
+            const exportLinks: Record<string, string> = meta.exportLinks ?? {};
+            if (Object.keys(exportLinks).length === 0) {
+              return formatDriveError(new Error(
+                `'${name}' ('${mimeType}') has no export formats: only Google Docs, Sheets, Slides, Drawings and Apps Script projects can be exported. ` +
+                `Use get_file to read a file stored as-is, or open it directly: ${webViewLink}`
+              ));
+            }
+
+            const resolved = resolveExportFormat(format, exportLinks);
+            if (!resolved.ok) {
+              return formatDriveError(new Error(`'${name}': ${resolved.error}`));
+            }
+
+            const bytes: Buffer = await makeDriveRequest(
+              `/files/${encodeURIComponent(file_id)}/export?mimeType=${encodeURIComponent(resolved.mimeType)}`,
+              accessToken,
+              {},
+              'bytes',
+            );
+
+            const result: Record<string, unknown> = {
+              id: meta.id,
+              name,
+              mimeType,
+              webViewLink,
+              exportMimeType: resolved.mimeType,
+              size: bytes.length,
+              exportLink: resolved.link,
+            };
+            const kind = exportKind(resolved.mimeType);
+            if (kind === 'text') result.content = bytes.toString('utf8');
+
+            const content: any[] = [{ type: 'text', text: JSON.stringify(result, null, 2) }];
+            if (kind === 'image') {
+              content.push({ type: 'image', data: bytes.toString('base64'), mimeType: resolved.mimeType });
+            } else if (kind === 'binary') {
+              content.push({
+                type: 'resource',
+                resource: { uri: resolved.link, mimeType: resolved.mimeType, blob: bytes.toString('base64') },
+              });
+            }
+            return { content, structuredContent: result };
+          } catch (err) {
+            return formatDriveError(err);
+          }
         }),
       },
 

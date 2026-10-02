@@ -56,6 +56,8 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
     case 403:
       hint = reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded'
         ? 'Rate limited by Google. Retried already — back off and try again later.'
+        : reason === 'exportSizeLimitExceeded'
+        ? 'The export is over Google\'s 10MB export limit. Try a lighter format (md, txt or csv instead of pdf or docx), or open the file directly.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:
@@ -121,11 +123,13 @@ async function sleep(ms: number): Promise<void> {
 }
 
 // throws DriveApiError on non-2xx; retries 429 and (for safe methods) 5xx
-// with bounded backoff honouring Retry-After
+// with bounded backoff honouring Retry-After. `bytes` returns the raw body for
+// downloads such as files.export, which text decoding would corrupt
 export async function makeDriveRequest(
   endpoint: string,
   accessToken: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  responseType: 'json' | 'bytes' = 'json',
 ): Promise<any> {
   const url = endpoint.startsWith('http') ? endpoint : `${GOOGLE_DRIVE_API}${endpoint}`;
   const method = (options.method || 'GET').toUpperCase();
@@ -137,12 +141,13 @@ export async function makeDriveRequest(
       method,
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'Accept': 'application/json',
+        ...(responseType === 'json' && { 'Accept': 'application/json' }),
         ...options.headers,
       },
     });
 
     if (response.ok) {
+      if (responseType === 'bytes') return Buffer.from(await response.arrayBuffer());
       // no-content responses (e.g. some DELETE/PATCH)
       if (response.status === 204) return null;
       const text = await response.text();

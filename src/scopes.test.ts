@@ -63,6 +63,7 @@ function toolNames(granted: Set<string> | null): string[] {
 const ALL_TOOLS = [
   "copy_file",
   "create_folder",
+  "export_file",
   "get_file",
   "get_file_metadata",
   "get_file_permissions",
@@ -97,6 +98,7 @@ describe("createServer tool surface", () => {
 
   test("a read-only grant withholds every write tool", () => {
     expect(toolNames(expandScopes([SCOPES.DRIVE_READONLY]))).toEqual([
+      "export_file",
       "get_file",
       "get_file_metadata",
       "get_file_permissions",
