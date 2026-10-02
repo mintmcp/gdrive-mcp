@@ -19,10 +19,22 @@ export class DriveApiError extends Error {
   }
 }
 
+// The `code` for an error that isn't Google's. A failed fetch is a TypeError like
+// a bug in our code, so the system code on its cause (ECONNRESET, ENOTFOUND,
+// UND_ERR_CONNECT_TIMEOUT) comes first. A plain Error is a message we wrote,
+// usually a rejected input, so it gets no code; any other class (TypeError,
+// RangeError) points at a bug
+function errorClass(err: Error): string | undefined {
+  const cause = (err as { cause?: { code?: unknown } }).cause;
+  if (typeof cause?.code === "string") return cause.code;
+  return err.name === "Error" ? undefined : err.name;
+}
+
 // status-specific hints so the LLM can self-correct
 export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let status: number | undefined;
   let reason: string | undefined;
+  let code: string | undefined;
   let message: string;
 
   if (err instanceof DriveApiError) {
@@ -31,6 +43,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
     message = err.message;
   } else if (err instanceof Error) {
     message = err.message;
+    code = errorClass(err);
   } else {
     message = String(err);
   }
@@ -61,6 +74,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
   const payload: any = { error: message };
   if (status !== undefined) payload.status = status;
   if (reason) payload.reason = reason;
+  if (code) payload.code = code;
   if (hint) payload.hint = hint;
 
   return {

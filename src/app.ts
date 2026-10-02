@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "./server.js";
 import { requireAccessToken } from "./auth.js";
 import { jsonRpcError, messagesOf, responseIdFor } from "./jsonrpc.js";
+import { log, errorFields } from "./log.js";
 
 export const MCP_PATH = "/mcp";
 
@@ -33,7 +34,7 @@ export function createApp(granted: Set<string> | null) {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      console.error("[gdrive-hosted] MCP request error:", err);
+      log("error", "mcp_request_error", errorFields(err));
       if (!res.headersSent) {
         res
           .status(500)
