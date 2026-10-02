@@ -19,3 +19,18 @@ export function log(level: LogLevel, event: string, fields?: Record<string, unkn
 export function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
+
+// Describes an error for a log line without its message, which can echo ids,
+// names or other user data: the class, plus status, reason and code when the
+// error carries them (a failed fetch keeps its code on `cause`). reason and
+// code are kept only when they look like identifiers
+export function errorFields(err: unknown): { error: string; status?: number; reason?: string; code?: string } {
+  const e = err as { status?: unknown; reason?: unknown; code?: unknown; cause?: { code?: unknown } } | null;
+  const id = (v: unknown) => (typeof v === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(v) ? v : undefined);
+  return {
+    error: err instanceof Error ? err.name : typeof err,
+    status: typeof e?.status === "number" ? e.status : undefined,
+    reason: id(e?.reason),
+    code: id(e?.code) ?? id(e?.cause?.code),
+  };
+}

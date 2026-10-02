@@ -57,7 +57,10 @@ export function logToolErrors(
 
 // reason and code are identifiers such as notFound, permission_denied or
 // TypeError. Each connector fills in only some of them, and anything that
-// isn't an identifier is dropped rather than logged
+// isn't an identifier is dropped rather than logged. They are NOT normalized
+// across connectors: gslides and gsheets send their own codes (not_found),
+// gmail and gdocs send Google's status enum (INVALID_ARGUMENT, NOT_FOUND), and
+// gdrive sends Google's reason (notFound) as reason. Compare within a connector
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 function errorCodes(result: any): { status?: number; reason?: string; code?: string } {

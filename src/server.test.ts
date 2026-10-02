@@ -164,3 +164,35 @@ describe("logToolSurface", () => {
     expect(record.tools.length).toBeGreaterThan(0);
   });
 });
+
+describe("get_file PDF extraction failure", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("logs the class, bytes and time, but no file id or message", async () => {
+    const meta = { id: `id-${SECRET}`, name: `${SECRET}.pdf`, mimeType: "application/pdf", size: "9" };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("alt=media")) return new Response("not a pdf", { status: 200 });
+      if (String(url).includes("listLabels")) return new Response(JSON.stringify({ labels: [] }), { status: 200 });
+      return new Response(JSON.stringify(meta), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await createServer(null).connect(serverTransport);
+    await client.connect(clientTransport);
+    const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await requestContext.run({ accessToken: "tok" } as any, () =>
+      client.callTool({ name: "get_file", arguments: { file_id: `id-${SECRET}` } }),
+    );
+
+    const out = written.mock.calls.map(([chunk]) => String(chunk));
+    const failed = out.map((l) => JSON.parse(l)).find((r) => r.event === "pdf_extraction_failed");
+    expect(failed).toMatchObject({ level: "error", bytes: 9 });
+    expect(typeof failed.error).toBe("string");
+    expect(typeof failed.elapsedMs).toBe("number");
+    expect(out.join("")).not.toContain(SECRET);
+  });
+});

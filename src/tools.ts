@@ -8,6 +8,7 @@ import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
+import { log, errorFields } from "./log.js";
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
@@ -902,6 +903,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             if (kind === 'pdf') {
               const arrayBuffer = await response.arrayBuffer();
+              // read before extraction: the PDF parser can detach the buffer
+              const bytes = arrayBuffer.byteLength;
               let pdfText: PdfText | undefined;
               let failure: string | undefined;
               const startedAt = Date.now();
@@ -909,11 +912,11 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
                 pdfText = await extractPdfText(new Uint8Array(arrayBuffer));
               } catch (err: any) {
                 failure = err?.message || 'the PDF could not be parsed';
-                console.error(
-                  `[gdrive-hosted] get_file: pdf text extraction failed fileId=${file_id} ` +
-                  `bytes=${arrayBuffer.byteLength} type=${err?.name || typeof err} ` +
-                  `elapsedMs=${Date.now() - startedAt} error=${err?.message}`
-                );
+                log("error", "pdf_extraction_failed", {
+                  ...errorFields(err),
+                  bytes,
+                  elapsedMs: Date.now() - startedAt,
+                });
               }
 
               let result: Record<string, unknown>;
