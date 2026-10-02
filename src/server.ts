@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
 import { isToolGranted } from "./scopes.js";
+import { log, truncate } from "./log.js";
 
 const SERVER_NAME = "Google Drive";
 const SERVER_VERSION = "2.0.0";
@@ -26,29 +27,46 @@ export function logToolSurface(granted: Set<string> | null): void {
 }
 
 // Handlers return failures as isError results, so without this a failed call
-// leaves no trace in the server logs. Args aren't logged, but the error text
-// can still echo ids, file names or other caller input
+// leaves no trace in the server logs. Only fields that can't hold user data are
+// logged; the full message already went back to the client in the tool result
 export function logToolErrors(
   toolName: string,
   handler: (args: unknown) => Promise<any>,
 ): (args: unknown) => Promise<any> {
-  const log = (detail: string) =>
-    console.error(
-      `[gdrive-hosted] tool_error tool=${toolName} ${detail.replace(/\s+/g, " ").slice(0, 500)}`,
-    );
   return async (args) => {
+    let result;
     try {
-      const result = await handler(args);
-      if (result?.isError) log(`error=${result.content?.[0]?.text}`);
-      return result;
+      result = await handler(args);
     } catch (err) {
-      log(
-        err instanceof Error
-          ? `thrown=${err.name} error=${err.message}`
-          : `thrown=${typeof err} error=${String(err)}`,
-      );
+      // A throw is a bug in our code, so the message is worth keeping here
+      log("error", "tool_handler_throw", {
+        tool: toolName,
+        error: err instanceof Error ? err.name : typeof err,
+        message: truncate(err instanceof Error ? err.message : String(err), 200),
+      });
       throw err;
     }
+    if (result?.isError) log("warn", "tool_call_error", { tool: toolName, ...errorCodes(result) });
+    return result;
+  };
+}
+
+// Google reasons and our codes are identifiers like notFound or
+// appNotAuthorizedToFile; anything else is dropped rather than logged
+const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function errorCodes(result: any): { status?: number; reason?: string; code?: string } {
+  let payload;
+  try {
+    payload = JSON.parse(result.content?.[0]?.text);
+  } catch {
+    return {};
+  }
+  const pick = (v: unknown) => (typeof v === "string" && IDENTIFIER.test(v) ? v : undefined);
+  return {
+    status: typeof payload?.status === "number" ? payload.status : undefined,
+    reason: pick(payload?.reason),
+    code: pick(payload?.code),
   };
 }
 

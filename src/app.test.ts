@@ -79,21 +79,27 @@ describe('concurrent MCP requests', () => {
 });
 
 describe('tool error logging', () => {
-  it('logs a failed tool call with its tool name and error, but not the caller token', async () => {
+  it('logs status and reason of a failed tool call, but not its message or the caller token', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ error: { code: 404, message: 'File not found: secret-id.' } }),
+      JSON.stringify({ error: { code: 404, message: 'File not found: secret-id.', errors: [{ reason: 'notFound' }] } }),
       { status: 404, headers: { 'Content-Type': 'application/json' } },
     )));
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const written = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     const { message } = await callTool(1, 'token-1');
 
     expect(message.result.isError).toBe(true);
-    const lines = logged.mock.calls.map((call) => call.join(' '));
+    expect(JSON.stringify(message.result)).toContain('secret-id');
+    const lines = written.mock.calls.map(([chunk]) => String(chunk)).filter((l) => l.includes('tool_call_error'));
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^\[gdrive-hosted\] tool_error tool=get_file_metadata /);
-    expect(lines[0]).toContain('"status":404');
-    expect(lines[0]).toContain('File not found');
+    const { ts, ...record } = JSON.parse(lines[0]);
+    expect(record).toEqual({
+      level: 'warn',
+      event: 'tool_call_error',
+      tool: 'get_file_metadata',
+      status: 404,
+      reason: 'notFound',
+    });
     expect(lines[0]).not.toContain('token-1');
   });
 });
