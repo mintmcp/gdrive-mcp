@@ -1,5 +1,5 @@
-// Same format as gslides-mcp's src/lib/log.ts, so the Google connectors log
-// alike: one JSON object per line on stdout
+// Same format as the other Google connectors (gslides-mcp src/lib/log.ts): one
+// JSON object per line on stdout
 
 export type LogLevel = "info" | "warn" | "error";
 

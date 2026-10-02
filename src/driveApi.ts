@@ -23,6 +23,7 @@ export class DriveApiError extends Error {
 export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let status: number | undefined;
   let reason: string | undefined;
+  let code: string | undefined;
   let message: string;
 
   if (err instanceof DriveApiError) {
@@ -31,6 +32,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
     message = err.message;
   } else if (err instanceof Error) {
     message = err.message;
+    code = err.name;
   } else {
     message = String(err);
   }
@@ -61,6 +63,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
   const payload: any = { error: message };
   if (status !== undefined) payload.status = status;
   if (reason) payload.reason = reason;
+  if (code) payload.code = code;
   if (hint) payload.hint = hint;
 
   return {

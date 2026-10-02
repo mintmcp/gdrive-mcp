@@ -28,22 +28,26 @@ export function logToolSurface(granted: Set<string> | null): void {
 
 // Handlers return failures as isError results, so without this a failed call
 // leaves no trace in the server logs. Only fields that can't hold user data are
-// logged; the full message already went back to the client in the tool result
+// logged; the full message already went back to the client in the tool result.
+// gdrive, gslides, gsheets, gdocs and gmail share this code so they log alike
 export function logToolErrors(
   toolName: string,
-  handler: (args: unknown) => Promise<any>,
-): (args: unknown) => Promise<any> {
+  handler: (args: any) => Promise<any>,
+): (args: any) => Promise<any> {
   return async (args) => {
-    let result;
+    let result: any;
     try {
       result = await handler(args);
     } catch (err) {
-      // A throw is a bug in our code, so the message is worth keeping here
-      log("error", "tool_handler_throw", {
-        tool: toolName,
-        error: err instanceof Error ? err.name : typeof err,
-        message: truncate(err instanceof Error ? err.message : String(err), 200),
-      });
+      // A throw that gets this far is a bug in our code, so the message is
+      // worth keeping. Building the line must never replace the original error
+      try {
+        log("error", "tool_handler_throw", {
+          tool: toolName,
+          error: err instanceof Error ? err.name : typeof err,
+          message: truncate(err instanceof Error ? err.message : String(err), 200),
+        });
+      } catch {}
       throw err;
     }
     if (result?.isError) log("warn", "tool_call_error", { tool: toolName, ...errorCodes(result) });
@@ -51,12 +55,13 @@ export function logToolErrors(
   };
 }
 
-// Google reasons and our codes are identifiers like notFound or
-// appNotAuthorizedToFile; anything else is dropped rather than logged
+// reason and code are identifiers such as notFound, permission_denied or
+// TypeError. Each connector fills in only some of them, and anything that
+// isn't an identifier is dropped rather than logged
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 function errorCodes(result: any): { status?: number; reason?: string; code?: string } {
-  let payload;
+  let payload: any;
   try {
     payload = JSON.parse(result.content?.[0]?.text);
   } catch {
