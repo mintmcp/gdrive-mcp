@@ -33,6 +33,7 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Search / find   | `search_files`         | Drive `q` syntax + optional `mime_type` and `drive_id`.    |
 |                 | `list_recent_files`    | Most recently modified files, newest first; excludes folders/trash. |
 | Read / get      | `get_file`             | Up to 20MB; text / image / pdf. Rejects Google-native docs.|
+|                 | `export_file`          | Google-native docs to md, pdf, docx, xlsx, csv, pptx, png… |
 |                 | `get_file_metadata`    | Full metadata for any file/folder; no download.            |
 |                 | `get_file_permissions` | Lists who has access and at what role.                     |
 | Move / share    | `move_file`            | True move; removes the item from its previous parents.     |
@@ -45,11 +46,11 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 
 Every tool declares both `inputSchema` and `outputSchema`. JSON-shaped
 results (metadata, IDs, search hits, text file bodies) return
-`structuredContent` alongside the text block. Binary results from
-`get_file` are returned via MCP image / resource content blocks instead
-(images as `type: "image"`, PDFs as `type: "resource"` with the base64
-payload). Errors route through a single envelope with HTTP status,
-reason, and a corrective hint.
+`structuredContent` alongside the text block. Images from `get_file` and
+`export_file` also come back as a `type: "image"` block, and `export_file`'s
+binary formats (pdf, docx, xlsx, pptx, ...) as a `type: "resource"` block
+with the base64 payload and the export link as its `uri`. Errors route
+through a single envelope with HTTP status, reason, and a corrective hint.
 
 ## Drive label enrichment
 
@@ -84,7 +85,7 @@ Each tool declares the Google scope it needs (the first argument to
 
 | Scope                   | Tools                                                   |
 |-------------------------|---------------------------------------------------------|
-| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `get_file_metadata`, `get_file_permissions` |
+| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions` |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
 | `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
 

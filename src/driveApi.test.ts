@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { parseRetryAfter, backoffDelayMs, isRetryable, formatDriveError, DriveApiError } from './driveApi.js';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { parseRetryAfter, backoffDelayMs, isRetryable, formatDriveError, DriveApiError, makeDriveRequest } from './driveApi.js';
+import { stubFetch } from './testStubs.js';
 
 describe('parseRetryAfter', () => {
   it('parses numeric seconds', () => {
@@ -73,3 +74,15 @@ describe('formatDriveError', () => {
   });
 });
 
+
+describe('makeDriveRequest bytes mode', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('returns the body unchanged and does not ask for JSON', async () => {
+    const body = Buffer.from([0x7b, 0xff, 0xfe, 0x00, 0x7d]);
+    const calls = stubFetch([['/files/x/export', () => new Response(body, { status: 200 })]]);
+    const out = await makeDriveRequest('/files/x/export', 'tok', {}, 'bytes');
+    expect(Buffer.isBuffer(out) && out.equals(body)).toBe(true);
+    expect((calls[0].init?.headers as Record<string, string>).Accept).toBeUndefined();
+  });
+});
