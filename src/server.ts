@@ -17,19 +17,19 @@ export function logToolSurface(granted: Set<string> | null): void {
     (isToolGranted(t.handler?.scope, granted) ? registered : skipped).push(toolName);
   }
 
-  console.log(
-    `[gdrive-hosted] scopes=${granted === null ? "unrestricted" : [...granted].join(",")}`,
-  );
-  console.log(`[gdrive-hosted] tools=${registered.join(",") || "(none)"}`);
-  if (skipped.length > 0) {
-    console.log(`[gdrive-hosted] withheld (scope not granted)=${skipped.join(",")}`);
-  }
+  log("info", "tool_surface", {
+    scopes: granted === null ? "unrestricted" : [...granted],
+    tools: registered,
+    withheld: skipped,
+  });
 }
 
 // Handlers return failures as isError results, so without this a failed call
 // leaves no trace in the server logs. Only fields that can't hold user data are
 // logged; the full message already went back to the client in the tool result.
-// gdrive, gslides, gsheets, gdocs and gmail share this code so they log alike
+// This is a copy: gdrive, gslides, gsheets, gdocs and gmail carry the same code
+// so they log the same fields. gslides-mcp src/server.ts is the reference;
+// change it there first, then copy it to the other four
 export function logToolErrors(
   toolName: string,
   handler: (args: any) => Promise<any>,

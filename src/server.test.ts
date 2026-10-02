@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer, logToolErrors } from "./server.js";
+import { createServer, logToolErrors, logToolSurface } from "./server.js";
 import { requestContext } from "./auth.js";
 
 const SECRET = "Q3-salaries-secret";
@@ -61,6 +61,19 @@ describe("tool error logging over MCP", () => {
     expect(logged).toHaveLength(1);
     expect(JSON.parse(logged[0])).toMatchObject({ tool: "get_file_metadata", code: "TypeError" });
     expect(lines.join("")).not.toContain(SECRET);
+  });
+
+  it("gives a plain Error, which is one of our own messages, no code", async () => {
+    const { result, lines } = await callTool(async () => {
+      throw new Error(`rejected ${SECRET}`);
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).not.toContain('\\"code\\"');
+    const logged = lines.filter((l) => l.includes('"tool_call_error"'));
+    expect(logged).toHaveLength(1);
+    const { ts, ...record } = JSON.parse(logged[0]);
+    expect(record).toEqual({ level: "warn", event: "tool_call_error", tool: "get_file_metadata" });
   });
 
   it("logs the system code of a failed fetch instead of TypeError", async () => {
@@ -134,5 +147,20 @@ describe("logToolErrors", () => {
     const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     await logToolErrors("t", async () => ({ content: [] }))({});
     expect(written).not.toHaveBeenCalled();
+  });
+});
+
+describe("logToolSurface", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("writes one JSON line with the scopes and tools", () => {
+    const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    logToolSurface(null);
+    expect(written).toHaveBeenCalledTimes(1);
+    const record = JSON.parse(String(written.mock.calls[0][0]));
+    expect(record).toMatchObject({ level: "info", event: "tool_surface", scopes: "unrestricted", withheld: [] });
+    expect(record.tools.length).toBeGreaterThan(0);
   });
 });
