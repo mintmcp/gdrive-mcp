@@ -69,7 +69,7 @@ describe("tool error logging over MCP", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).not.toContain('\\"code\\"');
+    expect(JSON.parse((result.content as any)[0].text)).not.toHaveProperty("code");
     const logged = lines.filter((l) => l.includes('"tool_call_error"'));
     expect(logged).toHaveLength(1);
     const { ts, ...record } = JSON.parse(logged[0]);
