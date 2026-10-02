@@ -103,6 +103,7 @@ const EXPORT_FORMATS: Record<string, string> = {
   svg: 'image/svg+xml',
   json: 'application/vnd.google-apps.script+json',
 };
+const EXPORT_FORMAT_NAMES = Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n]));
 
 /**
  * Resolve export_file's `format` (a short name such as "pdf", or a MIME type)
@@ -114,12 +115,11 @@ export function resolveExportFormat(
   exportLinks: Record<string, string>,
 ): { ok: true; mimeType: string; link: string } | { ok: false; error: string } {
   const requested = format.trim().toLowerCase().replace(/^\./, '');
-  const mimeType = EXPORT_FORMATS[requested] ?? requested;
-  const link = exportLinks[mimeType];
+  const mimeType = Object.hasOwn(EXPORT_FORMATS, requested) ? EXPORT_FORMATS[requested] : requested;
+  const link = Object.hasOwn(exportLinks, mimeType) ? exportLinks[mimeType] : undefined;
   if (link) return { ok: true, mimeType, link };
 
-  const names = Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n]));
-  const available = Object.keys(exportLinks).map((m) => names[m] ?? m);
+  const available = Object.keys(exportLinks).map((m) => EXPORT_FORMAT_NAMES[m] ?? m);
   return {
     ok: false,
     error: `format "${format}" is not available for this file. Available formats: ${available.join(', ')}.`,

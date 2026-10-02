@@ -623,6 +623,11 @@ describe('resolveExportFormat', () => {
     expect(r.ok && r.mimeType).toBe('application/vnd.oasis.opendocument.text');
   });
 
+  it('treats inherited property names as unknown formats', () => {
+    expect(resolveExportFormat('constructor', DOC_EXPORT_LINKS).ok).toBe(false);
+    expect(resolveExportFormat('__proto__', DOC_EXPORT_LINKS).ok).toBe(false);
+  });
+
   it('lists what the file accepts, by short name where one exists', () => {
     const r = resolveExportFormat('xlsx', DOC_EXPORT_LINKS);
     expect(r.ok).toBe(false);

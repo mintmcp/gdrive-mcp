@@ -57,7 +57,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
       hint = reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded'
         ? 'Rate limited by Google. Retried already — back off and try again later.'
         : reason === 'exportSizeLimitExceeded'
-        ? 'The export is over Google\'s 10MB export limit. Try a lighter format (md, txt or csv instead of pdf or docx), or open the file directly.'
+        ? 'The export is over Google\'s 10MB export limit. Try a lighter format (for a Doc, md or txt instead of pdf or docx), or open the file directly.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:
