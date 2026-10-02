@@ -62,6 +62,19 @@ describe("tool error logging over MCP", () => {
     expect(JSON.parse(logged[0])).toMatchObject({ tool: "get_file_metadata", code: "TypeError" });
     expect(lines.join("")).not.toContain(SECRET);
   });
+
+  it("logs the system code of a failed fetch instead of TypeError", async () => {
+    const cause = Object.assign(new Error(`getaddrinfo ENOTFOUND ${SECRET}`), { code: "ENOTFOUND" });
+    const { result, lines } = await callTool(async () => {
+      throw new TypeError("fetch failed", { cause });
+    });
+
+    expect(result.isError).toBe(true);
+    const logged = lines.filter((l) => l.includes('"tool_call_error"'));
+    expect(logged).toHaveLength(1);
+    expect(JSON.parse(logged[0])).toMatchObject({ tool: "get_file_metadata", code: "ENOTFOUND" });
+    expect(lines.join("")).not.toContain(SECRET);
+  });
 });
 
 describe("logToolErrors", () => {

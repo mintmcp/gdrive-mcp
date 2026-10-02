@@ -19,6 +19,13 @@ export class DriveApiError extends Error {
   }
 }
 
+// A failed fetch is a TypeError like a bug in our code; the system code on its
+// cause (ECONNRESET, ENOTFOUND, UND_ERR_CONNECT_TIMEOUT) tells them apart
+function errorClass(err: Error): string {
+  const cause = (err as { cause?: { code?: unknown } }).cause;
+  return typeof cause?.code === "string" ? cause.code : err.name;
+}
+
 // status-specific hints so the LLM can self-correct
 export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let status: number | undefined;
@@ -32,7 +39,7 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
     message = err.message;
   } else if (err instanceof Error) {
     message = err.message;
-    code = err.name;
+    code = errorClass(err);
   } else {
     message = String(err);
   }

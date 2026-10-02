@@ -92,7 +92,7 @@ export function createServer(granted: Set<string> | null): McpServer {
           destructiveHint: t.destructiveHint ?? false,
         },
       },
-      logToolErrors(toolName, t.handler),
+      logToolErrors(toolName, (args) => t.handler(args)),
     );
   }
 

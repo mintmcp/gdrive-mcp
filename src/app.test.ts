@@ -24,7 +24,6 @@ afterAll(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.restoreAllMocks();
 });
 
 // Slow enough that every request is in flight at once; echoes the caller's
@@ -75,31 +74,5 @@ describe('concurrent MCP requests', () => {
       expect(message.result.isError).toBeUndefined();
       expect(message.result.structuredContent.name).toBe(`token-${i + 1}`);
     });
-  });
-});
-
-describe('tool error logging', () => {
-  it('logs status and reason of a failed tool call, but not its message or the caller token', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ error: { code: 404, message: 'File not found: secret-id.', errors: [{ reason: 'notFound' }] } }),
-      { status: 404, headers: { 'Content-Type': 'application/json' } },
-    )));
-    const written = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-
-    const { message } = await callTool(1, 'token-1');
-
-    expect(message.result.isError).toBe(true);
-    expect(JSON.stringify(message.result)).toContain('secret-id');
-    const lines = written.mock.calls.map(([chunk]) => String(chunk)).filter((l) => l.includes('tool_call_error'));
-    expect(lines).toHaveLength(1);
-    const { ts, ...record } = JSON.parse(lines[0]);
-    expect(record).toEqual({
-      level: 'warn',
-      event: 'tool_call_error',
-      tool: 'get_file_metadata',
-      status: 404,
-      reason: 'notFound',
-    });
-    expect(lines[0]).not.toContain('token-1');
   });
 });
