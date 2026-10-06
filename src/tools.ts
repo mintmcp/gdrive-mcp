@@ -8,6 +8,7 @@ import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
+import { resolveExportFormat, exportKind } from './exportFormats.js';
 import { log, errorFields } from "./log.js";
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
@@ -51,6 +52,11 @@ const OFFICE_ROUTES: Record<string, string> = {
     'This is a legacy Word (.doc) file — use the Google Docs MCP server to read it.',
 };
 
+const GOOGLE_NATIVE_EXPORT_ONLY: Record<string, string> = {
+  'application/vnd.google-apps.drawing': 'a Google Drawing',
+  'application/vnd.google-apps.script': 'an Apps Script project',
+};
+
 const GOOGLE_NATIVE_CREATORS: Record<string, string> = {
   'application/vnd.google-apps.document':
     'To author a Google Doc, use create_document on the Google Docs MCP server.',
@@ -74,66 +80,14 @@ export function unsupportedMessage(name: string, mimeType: string, webViewLink: 
   if (service) {
     return `'${name}' is a ${service} file, which get_file cannot read. Use the ${service} MCP server to read its contents, export_file to export it (for example as Markdown or PDF), or open it directly: ${webViewLink}`;
   }
+  const exportable = GOOGLE_NATIVE_EXPORT_ONLY[mimeType];
+  if (exportable) {
+    return `'${name}' is ${exportable}, which get_file cannot read. Use export_file to export it, or open it directly: ${webViewLink}`;
+  }
   if (mimeType.startsWith('application/vnd.google-apps.')) {
-    return `'${name}' is a Google Drive-native file ('${mimeType}'), which get_file cannot read. Drawings and Apps Script projects can be exported with export_file; otherwise open it directly: ${webViewLink}`;
+    return `'${name}' is a Google Drive-native file ('${mimeType}') with no downloadable contents. Open it directly: ${webViewLink}`;
   }
   return `File '${name}' has unsupported mimeType '${mimeType}'. This tool supports text, image and PDF files. Open it directly: ${webViewLink}`;
-}
-
-// Short names for Drive's export MIME types. A file's own exportLinks decide
-// which of them it accepts, so this only names formats and never gates them
-const EXPORT_FORMATS: Record<string, string> = {
-  pdf: 'application/pdf',
-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  odt: 'application/vnd.oasis.opendocument.text',
-  rtf: 'application/rtf',
-  txt: 'text/plain',
-  md: 'text/markdown',
-  html: 'text/html',
-  epub: 'application/epub+zip',
-  zip: 'application/zip',
-  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  ods: 'application/vnd.oasis.opendocument.spreadsheet',
-  csv: 'text/csv',
-  tsv: 'text/tab-separated-values',
-  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  odp: 'application/vnd.oasis.opendocument.presentation',
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  svg: 'image/svg+xml',
-  json: 'application/vnd.google-apps.script+json',
-};
-const EXPORT_FORMAT_NAMES = Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n]));
-
-/**
- * Resolve export_file's `format` (a short name such as "pdf", or a MIME type)
- * against the file's exportLinks. An unavailable format lists the ones the
- * file does accept, so the caller can retry without guessing
- */
-export function resolveExportFormat(
-  format: string,
-  exportLinks: Record<string, string>,
-): { ok: true; mimeType: string; link: string } | { ok: false; error: string } {
-  const requested = format.trim().toLowerCase().replace(/^\./, '');
-  const mimeType = Object.hasOwn(EXPORT_FORMATS, requested) ? EXPORT_FORMATS[requested] : requested;
-  const link = Object.hasOwn(exportLinks, mimeType) ? exportLinks[mimeType] : undefined;
-  if (link) return { ok: true, mimeType, link };
-
-  const available = Object.keys(exportLinks).map((m) => EXPORT_FORMAT_NAMES[m] ?? m);
-  return {
-    ok: false,
-    error: `format "${format}" is not available for this file. Available formats: ${available.join(', ')}.`,
-  };
-}
-
-/**
- * How export_file returns an export: text the model can read, an image block,
- * or an embedded resource for binary formats
- */
-export function exportKind(mimeType: string): 'text' | 'image' | 'binary' {
-  if (mimeType.startsWith('text/') || mimeType === 'image/svg+xml' || mimeType.endsWith('+json')) return 'text';
-  if (mimeType.startsWith('image/')) return 'image';
-  return 'binary';
 }
 
 /**
@@ -1058,7 +1012,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       export_file: {
-        description: 'Export a Google Doc, Sheet, Slides deck, Drawing or Apps Script project to another format, such as Markdown, PDF, DOCX, XLSX, CSV, PPTX or PNG. Use this for Google-native files, which get_file cannot read; use get_file for files stored as-is (PDFs, images, text). Which formats a file accepts depends on its type; asking for one it does not accept returns the list it does. Text formats (md, txt, csv, tsv, html, svg, json) return the text in `content`. PNG and JPEG return an image. Other formats (pdf, docx, xlsx, pptx, ...) return the file as an embedded resource whose uri is the export link, which the user can open to download it. A Sheet exports only its first sheet as csv or tsv, and a Slides deck only its first slide as png, jpg or svg. Google caps exports at 10MB.',
+        description: 'Export a Google Doc, Sheet, Slides deck, Drawing or Apps Script project to another format, such as Markdown, PDF, DOCX, XLSX, CSV, PPTX or PNG. Use this for Google-native files, which get_file cannot read; use get_file for files stored as-is (PDFs, images, text). Which formats a file accepts depends on its type; asking for one it does not accept returns the list it does. Text formats (md, txt, csv, tsv, html, svg, json) return the text in `content`. PNG and JPEG return an image. Other formats (pdf, docx, xlsx, pptx, ...) return the file as an embedded resource plus an `exportLink`; if your client cannot handle the resource, the export still succeeded, so give the user `exportLink` to download it. A Sheet exports only its first sheet as csv or tsv, and a Slides deck only its first slide as png, jpg or svg. Google caps exports at 10MB.',
         readOnlyHint: true,
         outputSchema: {
           id: z.string().optional(),
@@ -1069,6 +1023,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           size: z.number().optional().describe('Size of the export in bytes'),
           exportLink: z.string().optional().describe('Link that downloads the export in a browser signed in to the account'),
           content: z.string().optional().describe('The exported text, for text formats'),
+          truncated: z.boolean().optional(),
+          message: z.string().optional().describe('Why content is partial, or what to do with a binary export'),
         },
         schema: {
           file_id: z.string().describe('The Google Drive file ID (from search_files).'),
@@ -1111,7 +1067,10 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               'bytes',
             );
 
-            const result: Record<string, unknown> = {
+            const kind = exportKind(resolved.mimeType);
+            const text = kind === 'text' ? bytes.toString('utf8') : undefined;
+            const truncated = text !== undefined && text.length > MAX_TEXT_CHARS;
+            const result = {
               id: meta.id,
               name,
               mimeType,
@@ -1119,20 +1078,29 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               exportMimeType: resolved.mimeType,
               size: bytes.length,
               exportLink: resolved.link,
+              ...(text !== undefined && { content: truncated ? text.slice(0, MAX_TEXT_CHARS) : text }),
+              ...(truncated && {
+                truncated: true,
+                message: `The text was truncated at ${MAX_TEXT_CHARS} characters. Full export: ${resolved.link}`,
+              }),
+              ...(kind === 'binary' && {
+                message:
+                  `'${name}' is attached as a resource. If your client cannot display or save it, ` +
+                  `the export still succeeded: give the user exportLink to download it.`,
+              }),
             };
-            const kind = exportKind(resolved.mimeType);
-            if (kind === 'text') result.content = bytes.toString('utf8');
 
-            const content: any[] = [{ type: 'text', text: JSON.stringify(result, null, 2) }];
-            if (kind === 'image') {
-              content.push({ type: 'image', data: bytes.toString('base64'), mimeType: resolved.mimeType });
-            } else if (kind === 'binary') {
-              content.push({
-                type: 'resource',
-                resource: { uri: resolved.link, mimeType: resolved.mimeType, blob: bytes.toString('base64') },
-              });
-            }
-            return { content, structuredContent: result };
+            const jsonBlock = { type: 'text' as const, text: JSON.stringify(result, null, 2) };
+            const fileBlock =
+              kind === 'image'
+                ? { type: 'image' as const, data: bytes.toString('base64'), mimeType: resolved.mimeType }
+                : kind === 'binary'
+                ? {
+                    type: 'resource' as const,
+                    resource: { uri: resolved.link, mimeType: resolved.mimeType, blob: bytes.toString('base64') },
+                  }
+                : undefined;
+            return { content: fileBlock ? [jsonBlock, fileBlock] : [jsonBlock], structuredContent: result };
           } catch (err) {
             return formatDriveError(err);
           }

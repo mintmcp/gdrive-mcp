@@ -12,11 +12,10 @@ import {
   requiresBase64,
   buildFileUpdate,
   formatDriveFile,
-  resolveExportFormat,
-  exportKind,
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
+import { MAX_TEXT_CHARS } from './pdfText.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
@@ -94,9 +93,15 @@ describe('unsupportedMessage', () => {
     expect(unsupportedMessage('S', 'application/vnd.google-apps.presentation', link)).toContain('Google Slides');
   });
 
+  it('points Drawings and Apps Script projects at export_file', () => {
+    expect(unsupportedMessage('D', 'application/vnd.google-apps.drawing', link)).toContain('export_file');
+    expect(unsupportedMessage('S', 'application/vnd.google-apps.script', link)).toContain('export_file');
+  });
+
   it('falls back to a generic message for other Google-native types', () => {
     const msg = unsupportedMessage('F', 'application/vnd.google-apps.form', link);
     expect(msg).toContain('Google Drive-native');
+    expect(msg).not.toContain('export_file');
     expect(msg).toContain(link);
   });
 
@@ -603,51 +608,7 @@ const DOC_EXPORT_LINKS = {
   'text/markdown': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=md',
   'application/pdf': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=pdf',
   'application/vnd.oasis.opendocument.text': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=odt',
-  'application/x-custom': 'https://docs.google.com/x',
 };
-
-describe('resolveExportFormat', () => {
-  it('maps a short name to its MIME type and export link', () => {
-    expect(resolveExportFormat('pdf', DOC_EXPORT_LINKS)).toEqual({
-      ok: true, mimeType: 'application/pdf', link: DOC_EXPORT_LINKS['application/pdf'],
-    });
-  });
-
-  it('accepts case, surrounding space and a leading dot', () => {
-    const r = resolveExportFormat(' .MD ', DOC_EXPORT_LINKS);
-    expect(r.ok && r.mimeType).toBe('text/markdown');
-  });
-
-  it('accepts a MIME type the file offers', () => {
-    const r = resolveExportFormat('application/vnd.oasis.opendocument.text', DOC_EXPORT_LINKS);
-    expect(r.ok && r.mimeType).toBe('application/vnd.oasis.opendocument.text');
-  });
-
-  it('does not match an inherited property of exportLinks', () => {
-    // exportLinks.constructor exists on every object, so a plain lookup would accept it
-    expect(resolveExportFormat('constructor', DOC_EXPORT_LINKS).ok).toBe(false);
-  });
-
-  it('lists what the file accepts, by short name where one exists', () => {
-    const r = resolveExportFormat('xlsx', DOC_EXPORT_LINKS);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain('Available formats: md, pdf, odt, application/x-custom.');
-  });
-});
-
-describe('exportKind', () => {
-  it('returns text formats as text', () => {
-    for (const m of ['text/markdown', 'text/csv', 'image/svg+xml', 'application/vnd.google-apps.script+json']) {
-      expect(exportKind(m)).toBe('text');
-    }
-  });
-
-  it('returns raster images as images and the rest as binary', () => {
-    expect(exportKind('image/png')).toBe('image');
-    expect(exportKind('application/pdf')).toBe('binary');
-    expect(exportKind('application/vnd.openxmlformats-officedocument.wordprocessingml.document')).toBe('binary');
-  });
-});
 
 describe('export_file handler', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -675,7 +636,19 @@ describe('export_file handler', () => {
       size: Buffer.byteLength('# Plan — été\n'), exportLink: DOC_EXPORT_LINKS['text/markdown'],
     });
     expect(res.content).toHaveLength(1);
+    expect(res.structuredContent.message).toBeUndefined();
     expect(new URL(calls[1].url).searchParams.get('mimeType')).toBe('text/markdown');
+  });
+
+  it('caps a text export at MAX_TEXT_CHARS and says so', async () => {
+    stubFetch([
+      metaRoute(DOC_META),
+      ['/files/d1/export', () => new Response('x'.repeat(MAX_TEXT_CHARS + 1), { status: 200 })],
+    ]);
+    const res = await exportFile({ format: 'md' });
+    expect(res.structuredContent.content).toHaveLength(MAX_TEXT_CHARS);
+    expect(res.structuredContent.truncated).toBe(true);
+    expect(res.structuredContent.message).toContain('truncated');
   });
 
   it('returns a binary export byte-for-byte as an embedded resource', async () => {
@@ -692,6 +665,7 @@ describe('export_file handler', () => {
     const resource = res.content[1];
     expect(resource.type).toBe('resource');
     expect(resource.resource.uri).toBe(DOC_EXPORT_LINKS['application/pdf']);
+    expect(res.structuredContent.message).toContain('give the user exportLink');
     expect(resource.resource.mimeType).toBe('application/pdf');
     expect(Buffer.from(resource.resource.blob, 'base64').equals(pdf)).toBe(true);
   });
