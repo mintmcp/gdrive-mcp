@@ -1068,7 +1068,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             );
 
             const kind = exportKind(resolved.mimeType);
-            const text = kind === 'text' ? bytes.toString('utf8') : undefined;
+            const text = kind === 'text' ? bytes.toString('utf8').replace(/^\uFEFF/, '') : undefined;
             const truncated = text !== undefined && text.length > MAX_TEXT_CHARS;
             const result = {
               id: meta.id,

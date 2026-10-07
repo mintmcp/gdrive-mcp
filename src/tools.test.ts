@@ -627,13 +627,13 @@ describe('export_file handler', () => {
   it('returns a text export as content, decoded as UTF-8', async () => {
     const calls = stubFetch([
       metaRoute(DOC_META),
-      ['/files/d1/export', () => new Response('# Plan — été\n', { status: 200 })],
+      ['/files/d1/export', () => new Response('\uFEFF# Plan — été\n', { status: 200 })],
     ]);
     const res = await exportFile({ format: 'md' });
     expect(res.isError).toBeUndefined();
     expect(res.structuredContent).toMatchObject({
       name: 'Plan', exportMimeType: 'text/markdown', content: '# Plan — été\n',
-      size: Buffer.byteLength('# Plan — été\n'), exportLink: DOC_EXPORT_LINKS['text/markdown'],
+      size: Buffer.byteLength('\uFEFF# Plan — été\n'), exportLink: DOC_EXPORT_LINKS['text/markdown'],
     });
     expect(res.content).toHaveLength(1);
     expect(res.structuredContent.message).toBeUndefined();

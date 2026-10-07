@@ -30,6 +30,15 @@ describe('resolveExportFormat', () => {
     expect(resolveExportFormat('constructor', DOC_EXPORT_LINKS).ok).toBe(false);
   });
 
+  it('lists each format once when a file offers it under two MIME types', () => {
+    const r = resolveExportFormat('docx', {
+      'application/vnd.oasis.opendocument.spreadsheet': 'https://x/1',
+      'application/x-vnd.oasis.opendocument.spreadsheet': 'https://x/2',
+      'text/csv': 'https://x/3',
+    });
+    if (!r.ok) expect(r.error).toContain('Available formats: ods, csv.');
+  });
+
   it('lists what the file accepts, by short name where one exists', () => {
     const r = resolveExportFormat('xlsx', DOC_EXPORT_LINKS);
     expect(r.ok).toBe(false);

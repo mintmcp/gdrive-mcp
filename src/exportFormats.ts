@@ -21,7 +21,11 @@ const EXPORT_FORMATS: Record<string, string> = {
   svg: 'image/svg+xml',
   json: 'application/vnd.google-apps.script+json',
 };
-const EXPORT_FORMAT_NAMES = Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n]));
+const EXPORT_FORMAT_NAMES: Record<string, string> = {
+  ...Object.fromEntries(Object.entries(EXPORT_FORMATS).map(([n, m]) => [m, n])),
+  // Sheets advertise ODS under this second MIME type as well
+  'application/x-vnd.oasis.opendocument.spreadsheet': 'ods',
+};
 
 /**
  * Resolve export_file's `format` (a short name such as "pdf", or a MIME type)
@@ -37,7 +41,7 @@ export function resolveExportFormat(
   const link = Object.hasOwn(exportLinks, mimeType) ? exportLinks[mimeType] : undefined;
   if (link) return { ok: true, mimeType, link };
 
-  const available = Object.keys(exportLinks).map((m) => EXPORT_FORMAT_NAMES[m] ?? m);
+  const available = [...new Set(Object.keys(exportLinks).map((m) => EXPORT_FORMAT_NAMES[m] ?? m))];
   return {
     ok: false,
     error: `format "${format}" is not available for this file. Available formats: ${available.join(', ')}.`,
