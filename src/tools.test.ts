@@ -15,6 +15,7 @@ import {
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
+import { MAX_TEXT_CHARS } from './pdfText.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
@@ -92,9 +93,15 @@ describe('unsupportedMessage', () => {
     expect(unsupportedMessage('S', 'application/vnd.google-apps.presentation', link)).toContain('Google Slides');
   });
 
+  it('points Drawings and Apps Script projects at export_file', () => {
+    expect(unsupportedMessage('D', 'application/vnd.google-apps.drawing', link)).toContain('export_file');
+    expect(unsupportedMessage('S', 'application/vnd.google-apps.script', link)).toContain('export_file');
+  });
+
   it('falls back to a generic message for other Google-native types', () => {
     const msg = unsupportedMessage('F', 'application/vnd.google-apps.form', link);
     expect(msg).toContain('Google Drive-native');
+    expect(msg).not.toContain('export_file');
     expect(msg).toContain(link);
   });
 
@@ -594,5 +601,111 @@ describe('copy_file handler', () => {
   it('does not copy comments by default or when copy_comments is false', async () => {
     expect((await copyQuery({})).get('copyComments')).toBe('false');
     expect((await copyQuery({ copy_comments: false })).get('copyComments')).toBe('false');
+  });
+});
+
+const DOC_EXPORT_LINKS = {
+  'text/markdown': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=md',
+  'application/pdf': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=pdf',
+  'application/vnd.oasis.opendocument.text': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=odt',
+};
+
+describe('export_file handler', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const exportFile = (args: Record<string, unknown>) =>
+    requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).export_file.handler({ file_id: 'd1', ...args }));
+
+  const DOC_META = {
+    id: 'd1', name: 'Plan', mimeType: 'application/vnd.google-apps.document',
+    webViewLink: 'https://docs.google.com/document/d/d1/edit', exportLinks: DOC_EXPORT_LINKS,
+  };
+  const metaRoute = (meta: unknown): [string, (url: string) => Response] =>
+    ['fields=id,name,mimeType,webViewLink,exportLinks', () => jsonResponse(meta)];
+
+  it('returns a text export as content, decoded as UTF-8', async () => {
+    const calls = stubFetch([
+      metaRoute(DOC_META),
+      ['/files/d1/export', () => new Response('\uFEFF# Plan — été\n', { status: 200 })],
+    ]);
+    const res = await exportFile({ format: 'md' });
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent).toMatchObject({
+      name: 'Plan', exportMimeType: 'text/markdown', content: '# Plan — été\n',
+      size: Buffer.byteLength('\uFEFF# Plan — été\n'), exportLink: DOC_EXPORT_LINKS['text/markdown'],
+    });
+    expect(res.content).toHaveLength(1);
+    expect(res.structuredContent.message).toBeUndefined();
+    expect(new URL(calls[1].url).searchParams.get('mimeType')).toBe('text/markdown');
+  });
+
+  it('caps a text export at MAX_TEXT_CHARS and says so', async () => {
+    stubFetch([
+      metaRoute(DOC_META),
+      ['/files/d1/export', () => new Response('x'.repeat(MAX_TEXT_CHARS + 1), { status: 200 })],
+    ]);
+    const res = await exportFile({ format: 'md' });
+    expect(res.structuredContent.content).toHaveLength(MAX_TEXT_CHARS);
+    expect(res.structuredContent.truncated).toBe(true);
+    expect(res.structuredContent.message).toContain('truncated');
+  });
+
+  it('returns a binary export byte-for-byte as an embedded resource', async () => {
+    // Not valid UTF-8: decoding it as text on the way through would corrupt it
+    const pdf = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0xe2, 0xe3, 0xcf, 0xd3, 0x00, 0xff, 0x80]);
+    stubFetch([
+      metaRoute(DOC_META),
+      ['/files/d1/export', () => new Response(pdf, { status: 200, headers: { 'Content-Type': 'application/pdf' } })],
+    ]);
+    const res = await exportFile({ format: 'pdf' });
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.size).toBe(pdf.length);
+    expect(res.structuredContent.content).toBeUndefined();
+    const resource = res.content[1];
+    expect(resource.type).toBe('resource');
+    expect(resource.resource.uri).toBe(DOC_EXPORT_LINKS['application/pdf']);
+    expect(res.structuredContent.message).toContain('give the user exportLink');
+    expect(resource.resource.mimeType).toBe('application/pdf');
+    expect(Buffer.from(resource.resource.blob, 'base64').equals(pdf)).toBe(true);
+  });
+
+  it('returns a PNG export as an image block', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    stubFetch([
+      metaRoute({ ...DOC_META, mimeType: 'application/vnd.google-apps.presentation', exportLinks: { 'image/png': 'https://x/png' } }),
+      ['/files/d1/export', () => new Response(png, { status: 200 })],
+    ]);
+    const res = await exportFile({ format: 'png' });
+    expect(res.content[1]).toEqual({ type: 'image', data: png.toString('base64'), mimeType: 'image/png' });
+  });
+
+  it('rejects a file with no export formats without calling export', async () => {
+    const calls = stubFetch([metaRoute({ id: 'd1', name: 'a.pdf', mimeType: 'application/pdf' })]);
+    const res = await exportFile({ format: 'pdf' });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toContain('Use get_file');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('rejects a format the file does not offer, listing the ones it does', async () => {
+    const calls = stubFetch([metaRoute(DOC_META)]);
+    const res = await exportFile({ format: 'xlsx' });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toContain('Available formats: md, pdf, odt');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('explains Google\'s 10MB export cap instead of calling it a permission problem', async () => {
+    stubFetch([
+      metaRoute(DOC_META),
+      ['/files/d1/export', () => jsonResponse({
+        error: { code: 403, message: 'This file is too large to be exported.', errors: [{ reason: 'exportSizeLimitExceeded' }] },
+      }, 403)],
+    ]);
+    const res = await exportFile({ format: 'pdf' });
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload).toMatchObject({ status: 403, reason: 'exportSizeLimitExceeded' });
+    expect(payload.hint).toContain('10MB');
   });
 });
