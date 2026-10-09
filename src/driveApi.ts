@@ -6,6 +6,16 @@ const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 4000;
 const MAX_RETRY_AFTER_MS = 30_000;     // cap server-supplied Retry-After
 
+// Thrown by makeDriveRequest's opt-in maxBytes cap, before any parsing
+export class ResponseTooLargeError extends Error {
+  maxBytes: number;
+  constructor(maxBytes: number) {
+    super(`The response body is over the ${maxBytes}-byte limit`);
+    this.name = 'ResponseTooLargeError';
+    this.maxBytes = maxBytes;
+  }
+}
+
 export class DriveApiError extends Error {
   status: number;
   reason?: string;
@@ -117,19 +127,65 @@ export function isRetryable(status: number, method: string): boolean {
   return false;
 }
 
-async function sleep(ms: number): Promise<void> {
+// Without a signal, a plain wait. With one, it rejects with the signal's
+// reason as soon as the signal aborts, so a deadline never waits out a backoff
+async function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  signal?.throwIfAborted();
   if (ms <= 0) return;
-  await new Promise((resolve) => setTimeout(resolve, ms));
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// Reads a body as a stream and gives up once it passes maxBytes, so an
+// oversized response is never held in memory or parsed
+async function readCapped(response: Response, maxBytes: number): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new ResponseTooLargeError(maxBytes);
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new ResponseTooLargeError(maxBytes);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+export interface DriveRequestLimits {
+  // Opt-in: read a 2xx body as a stream and throw ResponseTooLargeError once
+  // it passes this many bytes. Unset keeps the plain whole-body read
+  maxBytes?: number;
 }
 
 // throws DriveApiError on non-2xx; retries 429 and (for safe methods) 5xx
 // with bounded backoff honouring Retry-After. `bytes` returns the raw body for
-// downloads such as files.export, which text decoding would corrupt
+// downloads such as files.export, which text decoding would corrupt.
+// options.signal reaches fetch and also ends a retry wait early
 export async function makeDriveRequest(
   endpoint: string,
   accessToken: string,
   options: RequestInit = {},
   responseType: 'json' | 'bytes' = 'json',
+  limits: DriveRequestLimits = {},
 ): Promise<any> {
   const url = endpoint.startsWith('http') ? endpoint : `${GOOGLE_DRIVE_API}${endpoint}`;
   const method = (options.method || 'GET').toUpperCase();
@@ -145,6 +201,18 @@ export async function makeDriveRequest(
         ...options.headers,
       },
     });
+
+    if (response.ok && limits.maxBytes !== undefined) {
+      const body = await readCapped(response, limits.maxBytes);
+      if (responseType === 'bytes') return body;
+      if (response.status === 204 || body.length === 0) return null;
+      const text = body.toString('utf8');
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
 
     if (response.ok) {
       if (responseType === 'bytes') return Buffer.from(await response.arrayBuffer());
@@ -184,7 +252,7 @@ export async function makeDriveRequest(
 
     if (attempt < MAX_RETRY_ATTEMPTS && isRetryable(response.status, method)) {
       const delay = retryAfterMs ?? backoffDelayMs(attempt);
-      await sleep(delay);
+      await sleep(delay, options.signal);
       continue;
     }
     throw lastError;

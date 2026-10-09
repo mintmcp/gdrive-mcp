@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { parseRetryAfter, backoffDelayMs, isRetryable, formatDriveError, DriveApiError, makeDriveRequest } from './driveApi.js';
+import { parseRetryAfter, backoffDelayMs, isRetryable, formatDriveError, DriveApiError, ResponseTooLargeError, makeDriveRequest } from './driveApi.js';
 import { stubFetch } from './testStubs.js';
 
 describe('parseRetryAfter', () => {
@@ -84,5 +84,88 @@ describe('makeDriveRequest bytes mode', () => {
     const out = await makeDriveRequest('/files/x/export', 'tok', {}, 'bytes');
     expect(Buffer.isBuffer(out) && out.equals(body)).toBe(true);
     expect((calls[0].init?.headers as Record<string, string>).Accept).toBeUndefined();
+  });
+});
+
+describe('makeDriveRequest maxBytes cap', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('parses a body at the cap as before', async () => {
+    const body = JSON.stringify({ ok: true });
+    stubFetch([['/x', () => new Response(body, { status: 200 })]]);
+    await expect(makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: body.length })).resolves.toEqual({ ok: true });
+  });
+
+  it('returns raw bytes in bytes mode', async () => {
+    const body = Buffer.from([1, 2, 3]);
+    stubFetch([['/x', () => new Response(body, { status: 200 })]]);
+    const out = await makeDriveRequest('/x', 'tok', {}, 'bytes', { maxBytes: 3 });
+    expect(Buffer.isBuffer(out) && out.equals(body)).toBe(true);
+  });
+
+  it('throws ResponseTooLargeError once a streamed body passes the cap, without reading the rest', async () => {
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(new Uint8Array(1024).fill(0x61));
+        if (pulled === 100) controller.close();
+      },
+    });
+    stubFetch([['/x', () => new Response(stream, { status: 200 })]]);
+    const err = await makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: 4096 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ResponseTooLargeError);
+    expect(err.maxBytes).toBe(4096);
+    expect(pulled).toBeLessThan(100);
+  });
+
+  it('rejects up front when Content-Length is already over the cap', async () => {
+    stubFetch([['/x', () => new Response('x'.repeat(10), { status: 200, headers: { 'content-length': '10' } })]]);
+    await expect(makeDriveRequest('/x', 'tok', {}, 'bytes', { maxBytes: 9 })).rejects.toBeInstanceOf(ResponseTooLargeError);
+  });
+
+  it('leaves error bodies to the usual DriveApiError path', async () => {
+    stubFetch([['/x', () => new Response(JSON.stringify({ error: { message: 'nope', errors: [{ reason: 'notFound' }] } }), { status: 404 })]]);
+    const err = await makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(DriveApiError);
+    expect(err.status).toBe(404);
+  });
+});
+
+describe('makeDriveRequest abort signal', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('passes the signal to fetch', async () => {
+    const calls = stubFetch([['/x', () => new Response('{}', { status: 200 })]]);
+    const controller = new AbortController();
+    await makeDriveRequest('/x', 'tok', { signal: controller.signal });
+    expect(calls[0].init?.signal).toBe(controller.signal);
+  });
+
+  it('stops a retry wait as soon as the signal aborts', async () => {
+    vi.useFakeTimers();
+    const calls = stubFetch([['/x', () => new Response('', { status: 503, headers: { 'retry-after': '30' } })]]);
+    const controller = new AbortController();
+    const pending = makeDriveRequest('/x', 'tok', { signal: controller.signal }).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    const reason = new Error('deadline');
+    controller.abort(reason);
+    expect(await pending).toBe(reason);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('still waits out the backoff without a signal', async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    stubFetch([['/x', () => (++n < 2 ? new Response('', { status: 503, headers: { 'retry-after': '1' } }) : new Response('{"ok":1}', { status: 200 }))]]);
+    const pending = makeDriveRequest('/x', 'tok');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(n).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: 1 });
   });
 });

@@ -26,6 +26,14 @@ export type AppliedLabel = {
   skippedValueTypes?: SkippedValueType[];
 };
 
+// Optional, for resources/read (R3): the link's resource key goes on every
+// files.listLabels page, and the read's deadline signal on every label call.
+// Omitted, the calls are exactly what get_file and get_file_metadata make
+export type LabelReadOptions = {
+  resourceKey?: string;
+  signal?: AbortSignal;
+};
+
 export type FileLabels = {
   applied: AppliedLabel[];
   error?: 'label read failed' | 'incomplete label resolution';
@@ -36,7 +44,8 @@ export type FileLabels = {
 export async function getLabelInfo(
   labelId: string,
   revisionId: string | undefined,
-  accessToken: string
+  accessToken: string,
+  options: { signal?: AbortSignal } = {}
 ): Promise<{ title?: string; choices: LabelChoices }> {
   const labelResource = revisionId
     ? `${encodeURIComponent(labelId)}@${encodeURIComponent(revisionId)}`
@@ -44,7 +53,8 @@ export async function getLabelInfo(
 
   const data = await makeDriveRequest(
     `${DRIVE_LABELS_API}/labels/${labelResource}?view=LABEL_VIEW_FULL`,
-    accessToken
+    accessToken,
+    options.signal ? { signal: options.signal } : {}
   ) as {
     properties?: { title?: string };
     fields?: Array<{
@@ -73,7 +83,8 @@ export async function getLabelInfo(
 // whatever was read; policy should match ids, names are for humans
 export async function getFileLabels(
   fileId: string,
-  accessToken: string
+  accessToken: string,
+  options: LabelReadOptions = {}
 ): Promise<FileLabels> {
   type WireLabel = {
     id?: string;
@@ -90,6 +101,12 @@ export async function getFileLabels(
   const wire: WireLabel[] = [];
   let error: FileLabels['error'];
 
+  const listInit: RequestInit = {};
+  if (options.resourceKey) {
+    listInit.headers = { 'X-Goog-Drive-Resource-Keys': `${fileId}/${options.resourceKey}` };
+  }
+  if (options.signal) listInit.signal = options.signal;
+
   try {
     let pageToken: string | undefined;
     for (let page = 0; page < MAX_LABEL_PAGES; page++) {
@@ -97,7 +114,8 @@ export async function getFileLabels(
       if (pageToken) params.set('pageToken', pageToken);
       const pageData = await makeDriveRequest(
         `/files/${encodeURIComponent(fileId)}/listLabels?${params}`,
-        accessToken
+        accessToken,
+        listInit
       ) as { labels?: WireLabel[]; nextPageToken?: string };
       if (pageData?.labels) wire.push(...pageData.labels);
       pageToken = pageData?.nextPageToken;
@@ -120,7 +138,7 @@ export async function getFileLabels(
   });
 
   const lookups = await Promise.allSettled(
-    withIds.map((l) => getLabelInfo(l.id, l.revisionId, accessToken))
+    withIds.map((l) => getLabelInfo(l.id, l.revisionId, accessToken, { signal: options.signal }))
   );
 
   const applied: AppliedLabel[] = withIds.map((label, i) => {
@@ -195,10 +213,14 @@ export async function getFileLabels(
 
 // null when the grant lacks drive.labels.readonly: no label calls, no _meta,
 // meaning "surfacing not enabled", never "no labels". Never rejects
-export function fetchLabelsMeta(fileId: string, accessToken: string): Promise<Record<string, unknown>> | null {
+export function fetchLabelsMeta(
+  fileId: string,
+  accessToken: string,
+  options: LabelReadOptions = {}
+): Promise<Record<string, unknown>> | null {
   const granted = grantedScopes();
   if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
-  return getFileLabels(fileId, accessToken).then(({ applied, error }) => ({
+  return getFileLabels(fileId, accessToken, options).then(({ applied, error }) => ({
     applied,
     ...(error ? { labelsError: error } : {}),
   }));
