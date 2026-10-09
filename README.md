@@ -23,8 +23,12 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
 - `https://www.googleapis.com/auth/drive.labels.readonly` — optional, only in
-  the `labels` and `full` profiles; enables `get_file`'s label
-  enrichment (see [Drive label enrichment](#drive-label-enrichment))
+  the `labels` and `full` profiles; enables the label enrichment of
+  `get_file` and `resources/read` (see [Drive label enrichment](#drive-label-enrichment))
+
+Reading a Google Sheet as a resource uses the Google Sheets API under
+`drive.readonly`, so the Google Cloud project behind the OAuth client needs
+the Sheets API enabled. No extra scope.
 
 ## Tools
 
@@ -68,6 +72,85 @@ Policy should match ids (labelId/fieldId/choiceId); titles and display names
 are human overlays. `_meta.labelsError` flags a failed read or resolution.
 Without the scope, the label API calls are skipped entirely and no `_meta`
 is returned; absence means "surfacing not enabled", never "no labels".
+`resources/read` attaches the same `_meta` as `get_file` (see
+[Resources](#resources)).
+
+## Resources
+
+The server also serves MCP resources (capability `resources: {}`, no
+`subscribe` or `listChanged`), so a client such as Claude's Project
+**Context** picker can list Drive files and add them as text. Resources are
+on whenever the grant includes `drive.readonly`, which is every profile.
+The boot log's `tool_surface` line says `resources: true|false`.
+
+**`resources/list`** returns one page of recent files, newest first
+(`modifiedTime desc`, 50 per page, My Drive and every shared drive, trashed
+items excluded): folders, Google Docs, Sheets and Slides, PDFs and text
+files. Office files, images and other types aren't listed. Each resource's
+`uri` is the file's Drive `webViewLink`; `mimeType` is the type `read`
+returns; `_meta` carries `driveFileId`, `driveMimeType`, `modifiedTime` and,
+when Drive reports one, `driveSize` (the source file's bytes; there is no
+`size`, because `read` returns converted text). Pages chain through
+`nextCursor`. When Drive reports an incomplete all-drives search, the page
+carries `_meta.incompleteSearch: true`; a file Drive didn't search can still
+be added by pasting its link. `resources/templates/list` returns an empty
+list.
+
+**`resources/read`** takes a Drive or Docs link, listed or pasted, on
+`https://docs.google.com` or `https://drive.google.com`, each with an
+optional `/u/<n>`:
+
+- `docs.google.com/{document|spreadsheets|presentation|drawings|forms}/d/<id>/…`
+- `drive.google.com/file/d/<id>/…`
+- `drive.google.com/drive/folders/<id>`, `drive.google.com/drive/u/<n>/folders/<id>`
+- `drive.google.com/open?id=<id>`, `drive.google.com/uc?id=<id>`
+
+A link's `resourcekey` parameter is sent as `X-Goog-Drive-Resource-Keys` on
+every request for that file, which older link-shared files need.
+
+| Type | Returned text | `mimeType` |
+|---|---|---|
+| Google Doc | Drive export as Markdown | `text/markdown` |
+| Google Sheet | Every grid tab through the Sheets API: `# <tab name>` (hidden tabs marked) and the tab's CSV in a code block, within the limits below. Non-grid tabs (charts, data sources) are named as skipped | `text/markdown` |
+| Google Slides | Drive export as plain text | `text/plain` |
+| Folder | `# <folder name>` and its direct children (up to 200, folders first) as links with their type; their contents aren't included | `text/markdown` |
+| PDF | The text layer, as `get_file` extracts it, with a note when only some pages carry text | `text/plain` |
+| Text file | The file as UTF-8 | the file's own type |
+| Anything else | Error `-32002`, saying what the file is, with its link | — |
+
+A file too big to read (over Google's 10 MB export limit, or over 20 MB for
+PDFs and text files), a scanned PDF, and a PDF whose text can't be extracted
+still read successfully: the text is a short Markdown note with the file's
+name, type, size, link and why the content isn't included.
+
+A keyed Sheet link the Sheets API refuses falls back to Drive's CSV export of
+the first tab, with a note saying so.
+
+Limits, all in `src/limits.ts`:
+
+- text is capped at 200,000 characters (`MAX_TEXT_CHARS`, as `get_file` and
+  `export_file`), notes and links included, with a truncation note and the
+  file link;
+- Sheets: at most 256 columns per tab and 50,000 cells per read, given to
+  grid tabs in sheet order; fetched in `values.batchGet` calls of at most
+  10,000 cells (at most 6 calls); each response capped at 4 MiB and the read
+  at 10 MiB, checked while streaming. A tab read only in part carries a note
+  with the range read and the sheet link; tabs left out are named;
+- one 45 s deadline per read and 20 s per list. A read that passes it fails
+  with "timed out"; there is no partial content.
+
+Errors are JSON-RPC errors: `-32002` for a file Drive can't find or a link
+that isn't a Drive file, `-32602` for a stale `cursor`, `-32603` for
+anything else, with the same message and hint as the tools (a 401 says to
+reconnect Google). Failures are logged as `resource_list_error` /
+`resource_read_error` with `status`, `reason` and `code` only.
+
+On label-scoped deployments (`labels`, `full`), every successful read
+(including the short notes and folder listings) carries the same top-level
+`_meta` labels as `get_file`: `{ applied, labelsError? }`. `resources/list`
+does no label check, like `search_files`. The Google Drive folder allowlist
+middleware doesn't cover resources: the list can show files outside the
+allowed folders.
 
 ## Profiles
 
@@ -85,9 +168,9 @@ Each tool declares the Google scope it needs (the first argument to
 
 | Scope                   | Tools                                                   |
 |-------------------------|---------------------------------------------------------|
-| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions` |
+| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions`, and the [resources](#resources) |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
-| `drive.labels.readonly` | `get_file` label enrichment (`_meta.labels`), no tool of its own |
+| `drive.labels.readonly` | `get_file` and `resources/read` label enrichment (`_meta`), no tool of its own |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
 server registers only the tools that profile's scopes cover, so a tool is
