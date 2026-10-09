@@ -61,31 +61,37 @@ class DeadlineError extends Error {
  * Runs `work` under one deadline. The signal it gets aborts when the deadline
  * passes, and the call settles at that moment with the timeout, whatever the
  * work is doing (a stalled request, a long PDF extraction). A late result is
- * discarded
+ * discarded, also when synchronous work kept the timer from firing on time.
+ * Work passed to `track` keeps the deadline after the call settles: it may
+ * finish on its own, but is aborted if it outlives the deadline
  */
 async function withDeadline<T>(
   ms: number,
   message: string,
-  work: (signal: AbortSignal, deadlineAt: number) => Promise<T>,
+  work: (signal: AbortSignal, deadlineAt: number, track: (pending: Promise<unknown>) => void) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
   const deadlineAt = Date.now() + ms;
+  const tracked: Promise<unknown>[] = [];
+  const expire = () => {
+    if (!controller.signal.aborted) controller.abort(new DeadlineError(message));
+    return controller.signal.reason;
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new DeadlineError(message);
-      reject(err);
-      controller.abort(err);
-    }, ms);
+    timer = setTimeout(() => reject(expire()), ms);
   });
   try {
-    return await Promise.race([work(controller.signal, deadlineAt), expired]);
+    const result = await Promise.race([work(controller.signal, deadlineAt, (p) => tracked.push(p)), expired]);
+    if (Date.now() >= deadlineAt) throw expire();
+    return result;
   } catch (err) {
     // Once the deadline has passed, any outcome is the timeout
-    if (controller.signal.aborted) throw controller.signal.reason;
+    if (controller.signal.aborted || Date.now() >= deadlineAt) throw expire();
     throw err;
   } finally {
-    clearTimeout(timer);
+    if (tracked.length) void Promise.allSettled(tracked).then(() => clearTimeout(timer));
+    else clearTimeout(timer);
   }
 }
 
@@ -246,12 +252,14 @@ export async function readResource(uri: string): Promise<ReadResourceResult> {
   return withDeadline(
     RESOURCE_READ_DEADLINE_MS,
     `Reading this file timed out after ${RESOURCE_READ_DEADLINE_MS / 1000} s`,
-    async (signal, deadlineAt) => {
-      // D11: labels exactly as get_file attaches them, in parallel with the read
+    async (signal, deadlineAt, track) => {
+      // D11: labels exactly as get_file attaches them, in parallel with the read.
+      // On a content error they finish on their own, still under the deadline
       const labels = fetchLabelsMeta(file.id, accessToken, {
         ...(file.resourceKey ? { resourceKey: file.resourceKey } : {}),
         signal,
       });
+      if (labels) track(labels);
       const [content, labelsMeta] = await Promise.all([
         readContent(uri, file, accessToken, signal, deadlineAt),
         labels,
@@ -395,8 +403,10 @@ async function readPdf(
     const data = owned ? new Uint8Array(bytes.buffer, 0, bytes.byteLength) : new Uint8Array(bytes);
     pdf = await extractPdfText(data, { timeoutMs });
   } catch (err: any) {
-    // Precedence: past the deadline, the outcome is the timeout
+    // Precedence: past the deadline, the outcome is the timeout (withDeadline
+    // turns this throw into it, even before its timer has fired)
     read.signal.throwIfAborted();
+    if (Date.now() >= read.deadlineAt) throw err;
     failure = err?.message || 'the PDF could not be parsed';
     log('error', 'pdf_extraction_failed', {
       ...errorFields(err),

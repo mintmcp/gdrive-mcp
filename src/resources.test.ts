@@ -792,6 +792,60 @@ describe('resources/read', () => {
       expect(outcome.err.code).toBe(-32603);
       expect(outcome.err.message).toContain('timed out');
     });
+
+    // A synchronous final page blocks the event loop past the deadline, then
+    // settles before the deadline timer gets to run
+    it.each([false, true])('reports work that blocked past the deadline as the timeout, before the timer fires (extraction fails: %s)', async (fails) => {
+      extract.impl = async () => {
+        vi.setSystemTime(Date.now() + RESOURCE_READ_DEADLINE_MS + 1);
+        if (fails) throw new Error('synthetic final page error');
+        return { text: 'late', pages: 1, textPages: 1, charsPerPage: 4, scanned: false, truncated: false };
+      };
+      stubFetch([
+        [isMeta, () => json(meta('application/pdf', { size: '10' }))],
+        ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
+      ]);
+      const { pending } = await readWithClock(WEB(), 'standard');
+      const outcome: any = await pending;
+      expect(outcome.ok).toBeUndefined();
+      expect(outcome.err.code).toBe(-32603);
+      expect(outcome.err.message).toContain('timed out');
+      expect(records().some((r: any) => r.event === 'pdf_extraction_failed')).toBe(false);
+    });
+
+    it('returns a fast PDF read that finishes before the deadline', async () => {
+      extract.impl = async () => {
+        vi.setSystemTime(Date.now() + RESOURCE_READ_DEADLINE_MS - 1);
+        return { text: 'in time', pages: 1, textPages: 1, charsPerPage: 7, scanned: false, truncated: false };
+      };
+      stubFetch([
+        [isMeta, () => json(meta('application/pdf', { size: '10' }))],
+        ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
+      ]);
+      const { pending } = await readWithClock(WEB(), 'standard');
+      const outcome: any = await pending;
+      expect(outcome.ok.contents[0]).toMatchObject({ mimeType: 'text/plain' });
+    });
+
+    it('returns an early content error at once and still aborts a pending label lookup at the deadline', async () => {
+      let labelInit: RequestInit | undefined;
+      stubFetch([
+        [isMeta, () => googleError(404, 'notFound')],
+        ['listLabels', (_url, init) => {
+          labelInit = init;
+          return stall(init);
+        }],
+      ]);
+      const { pending, isSettled } = await readWithClock(WEB(), 'labels');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(isSettled()).toBe(true);
+      const outcome: any = await pending;
+      expect(outcome.err.code).toBe(-32002);
+      expect(labelInit?.signal?.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(RESOURCE_READ_DEADLINE_MS);
+      expect(labelInit?.signal?.aborted).toBe(true);
+    });
   });
 
   describe('logging', () => {

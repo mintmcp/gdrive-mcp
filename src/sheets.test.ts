@@ -496,6 +496,25 @@ describe('readSheet', () => {
     expect(text).toContain(`Not included, the ${MAX_TEXT_CHARS}-character limit was reached: 'Next'.`);
   });
 
+  it.each([false, true])('keeps the bounded-range and partial notes on a tab cut at the character cap (later batch over the byte cap: %s)', async (byteCap) => {
+    const rows = 1000;
+    const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
+    const data = grid(rows, 1, (r) => `${r}:${'w'.repeat(6000)}`);
+    if (byteCap) data[rowsPerBatch] = ['y'.repeat(SHEETS_MAX_BYTES_PER_CALL)];
+    fakeSheets([{ title: 'Wide', rowCount: rows, columnCount: 300, data }], { stream: byteCap });
+    const text = await readText();
+
+    expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
+    expect((text.match(/^```/gm) ?? []).length % 2).toBe(0);
+    const csv = tabCsv(text, 'Wide');
+    expect(csv.length).toBeGreaterThan(0);
+    expect(csv.length).toBeLessThan(rowsPerBatch);
+    expect(text).toMatch(/Read rows 1–\d+ and columns A–IV of a grid of 1000 rows × 300 columns\./);
+    expect(text).toContain(`Cropped: 'Wide' shows rows 1–${csv.length} of what was read`);
+    if (byteCap) expect(text).toContain(`Partial: rows 1–${rowsPerBatch} arrived before the size limit was reached.`);
+    else expect(text).not.toContain('Partial:');
+  });
+
   it.each([
     [403, 'forbidden'],
     [429, undefined],

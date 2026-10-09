@@ -373,8 +373,9 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
     }
 
     const sep = sections.length ? '\n\n' : '';
+    const notesText = tabNotes.length ? `\n\n${tabNotes.join('\n\n')}` : '';
     const build = (body: string) =>
-      `${sep}${heading}\n\n${fence}csv\n${body}${body ? '\n' : ''}${fence}${tabNotes.length ? `\n\n${tabNotes.join('\n\n')}` : ''}`;
+      `${sep}${heading}\n\n${fence}csv\n${body}${body ? '\n' : ''}${fence}${notesText}`;
     const whole = build(csv);
     if (used + whole.length <= contentBudget) {
       sections.push(whole);
@@ -382,9 +383,10 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
       continue;
     }
 
-    // Cut at a row boundary: the most rows whose section still fits
+    // Cut at a row boundary: the most rows whose section, range and partial
+    // notes included (R7), still fits
     charCapHit = true;
-    const shell = `${sep}${heading}\n\n${fence}csv\n${fence}`.length;
+    const shell = `${sep}${heading}\n\n${fence}csv\n${fence}${notesText}`.length;
     let room = contentBudget - used - shell;
     let kept = 0;
     let keptLength = 0;
@@ -396,7 +398,7 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
       charCapped.push(quoteName(tab.title));
       continue;
     }
-    const cut = `${sep}${heading}\n\n${fence}csv\n${lines.slice(0, kept).join('\n')}\n${fence}`;
+    const cut = `${sep}${heading}\n\n${fence}csv\n${lines.slice(0, kept).join('\n')}\n${fence}${notesText}`;
     sections.push(cut);
     used += cut.length;
     cropNote =
