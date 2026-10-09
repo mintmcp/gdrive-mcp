@@ -11,13 +11,13 @@ import { fetchLabelsMeta } from './labels.js';
 import { resolveExportFormat, exportKind } from './exportFormats.js';
 import { log, errorFields } from "./log.js";
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+export const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
 
 // MIME categorisation for get_file. We derive these from the *actual* metadata
 // mimeType, not from caller-supplied input, so the tool can't be lied into
 // returning garbled output.
-const TEXTUAL_APPLICATION_MIMES = new Set([
+export const TEXTUAL_APPLICATION_MIMES = new Set([
   'application/json',
   'application/xml',
   'application/javascript',

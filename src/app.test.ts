@@ -76,3 +76,36 @@ describe('concurrent MCP requests', () => {
     });
   });
 });
+
+describe('auth gate', () => {
+  async function post(body: unknown) {
+    return realFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each(['resources/list', 'resources/read', 'resources/templates/list'])(
+    'answers %s without a token with 401 and WWW-Authenticate',
+    async (method) => {
+      const res = await post({ jsonrpc: '2.0', id: 7, method, params: method === 'resources/read' ? { uri: 'https://drive.google.com/file/d/1234567890ab/view' } : {} });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toMatch(/^Bearer realm="gdrive-mcp", error="invalid_token"/);
+      expect((await res.json()).id).toBe(7);
+    },
+  );
+
+  it('keeps initialize open without a token', async () => {
+    const res = await post({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'probe', version: '0' } },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    const data = body.split('\n').find((line) => line.startsWith('data: '));
+    expect(JSON.parse(data ? data.slice(6) : body).result.capabilities.resources).toEqual({});
+  });
+});

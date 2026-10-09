@@ -21,11 +21,16 @@ export function bearerTokenFromHeader(header: string | undefined): string {
   return header?.match(/^Bearer\s+(.*)$/i)?.[1].trim() ?? "";
 }
 
+const TOKEN_METHODS = new Set([
+  "tools/list",
+  "tools/call",
+  "resources/list",
+  "resources/read",
+  "resources/templates/list",
+]);
+
 export function requiresAccessToken(body: unknown): boolean {
-  return messagesOf(body).some(
-    (message) =>
-      message.method === "tools/list" || message.method === "tools/call",
-  );
+  return messagesOf(body).some((message) => TOKEN_METHODS.has(message.method ?? ""));
 }
 
 // initialize stays open because MintMCP uses it for Fly readiness probes.

@@ -1,14 +1,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { isToolGranted } from "./scopes.js";
+import { isToolGranted, SCOPES } from "./scopes.js";
+import { registerResources } from "./resources.js";
 import { log, truncate } from "./log.js";
 
 const SERVER_NAME = "Google Drive";
-const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "2.1.0";
 
 // Built once: createServer runs per request, and rebuilding every Zod shape
 // each time would put that cost on every call
 const TOOLS = Object.entries(GoogleDriveTools.getTools()) as Array<[string, any]>;
+
+// Resources read files, so they need drive.readonly: every profile today
+export function resourcesGranted(granted: Set<string> | null): boolean {
+  return granted === null || granted.has(SCOPES.DRIVE_READONLY);
+}
 
 export function logToolSurface(granted: Set<string> | null): void {
   const registered: string[] = [];
@@ -21,6 +27,7 @@ export function logToolSurface(granted: Set<string> | null): void {
     scopes: granted === null ? "unrestricted" : [...granted],
     tools: registered,
     withheld: skipped,
+    resources: resourcesGranted(granted),
   });
 }
 
@@ -98,6 +105,8 @@ export function createServer(granted: Set<string> | null): McpServer {
       logToolErrors(toolName, (args) => t.handler(args)),
     );
   }
+
+  if (resourcesGranted(granted)) registerResources(server);
 
   return server;
 }
