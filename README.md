@@ -131,10 +131,13 @@ Limits, all in `src/limits.ts`:
 - text is capped at 200,000 characters (`MAX_TEXT_CHARS`, as `get_file` and
   `export_file`), notes and links included, with a truncation note and the
   file link;
-- Sheets: at most 256 columns per tab and 50,000 cells per read, given to
-  grid tabs in sheet order; fetched in `values.batchGet` calls of at most
-  10,000 cells (at most 6 calls); each response capped at 4 MiB and the read
-  at 10 MiB, checked while streaming. A tab read only in part carries a note
+- Sheets: every tab is requested whole (never split), up to 256 columns and
+  50,000 cells per tab, usually all in one `values.batchGet` call (at most
+  6). The 50,000-cell budget per read counts the cells with data that Sheets
+  returns, charged in sheet order; the tab that crosses it is cut and later
+  tabs are left out. Each response is capped at 4 MiB and the read at
+  10 MiB, checked while streaming; when a call over several tabs passes the
+  cap, tabs are read one per call. A tab read only in part carries a note
   with the range read and the sheet link; tabs left out are named;
 - one 45 s deadline per read and 20 s per list. A read that passes it fails
   with "timed out"; there is no partial content.
