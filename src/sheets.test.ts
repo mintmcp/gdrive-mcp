@@ -6,13 +6,13 @@ import {
   normalizeRows,
   planRead,
   readSheet,
+  tabRequest,
   type SheetTab,
   type SheetsContext,
 } from './sheets.js';
 import { DriveApiError } from './driveApi.js';
 import { MAX_TEXT_CHARS } from './pdfText.js';
 import {
-  SHEETS_BATCH_MAX_CELLS,
   SHEETS_MAX_BYTES_PER_CALL,
   SHEETS_MAX_BYTES_PER_READ,
   SHEETS_MAX_CELLS,
@@ -33,6 +33,9 @@ interface FakeTab {
   columnCount: number;
   // Cell values by [row][col], 0-based; missing means empty
   data?: string[][];
+  // Bytes of an extra field the reader ignores, added to this tab's ValueRange:
+  // a response size independent of the rendered text
+  padBytes?: number;
 }
 
 function tabOf(t: Partial<SheetTab> & { title: string; rowCount: number; columnCount: number }, index: number): SheetTab {
@@ -115,7 +118,12 @@ function fakeSheets(tabs: FakeTab[], options: FakeOptions = {}) {
         const { title, r1, r2, cols } = parseRange(range);
         const tab = tabs.find((t) => t.title === title)!;
         const values = valuesFor(tab, r1, r2, cols);
-        return { range, majorDimension: 'ROWS', ...(values.length ? { values } : {}) };
+        return {
+          range,
+          majorDimension: 'ROWS',
+          ...(values.length ? { values } : {}),
+          ...(tab.padBytes ? { padding: 'p'.repeat(tab.padBytes) } : {}),
+        };
       });
       return respond(JSON.stringify({ spreadsheetId: FILE_ID, valueRanges }));
     }
@@ -177,15 +185,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('limits', () => {
-  it('derives SHEETS_MAX_VALUE_CALLS from the cell budgets (6 with the starting values)', () => {
-    expect(SHEETS_MAX_VALUE_CALLS).toBe(
-      Math.ceil(SHEETS_MAX_CELLS / (SHEETS_BATCH_MAX_CELLS - SHEETS_MAX_COLUMNS_PER_TAB + 1)),
-    );
-    expect(SHEETS_MAX_VALUE_CALLS).toBe(6);
-  });
-});
-
 describe('Sheets helpers', () => {
   it('names columns', () => {
     expect([1, 26, 27, 52, 256].map(columnLetter)).toEqual(['A', 'Z', 'AA', 'AZ', 'IV']);
@@ -213,92 +212,75 @@ describe('Sheets helpers', () => {
 });
 
 describe('planRead', () => {
-  it('caps columns at SHEETS_MAX_COLUMNS_PER_TAB and allocates SHEETS_MAX_CELLS in sheet order', () => {
-    const wide = Math.floor(SHEETS_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB) + 10;
+  it('requests each grid tab whole, columns capped at SHEETS_MAX_COLUMNS_PER_TAB and rows at one cell budget', () => {
+    const perTabRows = Math.floor(SHEETS_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
     const plan = planRead([
-      tabOf({ title: 'Wide', rowCount: wide, columnCount: SHEETS_MAX_COLUMNS_PER_TAB + 44 }, 0),
-      tabOf({ title: 'Starved', rowCount: 10, columnCount: SHEETS_MAX_COLUMNS_PER_TAB }, 1),
+      tabOf({ title: 'Wide', rowCount: perTabRows + 10, columnCount: SHEETS_MAX_COLUMNS_PER_TAB + 44 }, 0),
+      tabOf({ title: 'Next', rowCount: 10, columnCount: SHEETS_MAX_COLUMNS_PER_TAB }, 1),
+      tabOf({ title: 'Empty', rowCount: 0, columnCount: 26 }, 2),
     ], FILE_ID);
 
-    expect(plan.plans).toHaveLength(1);
-    expect(plan.plans[0].cols).toBe(SHEETS_MAX_COLUMNS_PER_TAB);
-    expect(plan.plans[0].rows).toBe(Math.floor(SHEETS_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB));
-    // What's left is fewer cells than one row of the second tab: it gets 0 rows
-    expect(plan.overBudget.map((t) => t.title)).toEqual(['Starved']);
-  });
-
-  it('gives a later tab the rows that still fit', () => {
-    const plan = planRead([
-      tabOf({ title: 'A', rowCount: 1000, columnCount: 40 }, 0),
-      tabOf({ title: 'B', rowCount: 1000, columnCount: 20 }, 1),
-    ], FILE_ID);
-    expect(plan.plans.map((p) => [p.tab.title, p.rows, p.cols])).toEqual([
-      ['A', 1000, 40],
-      ['B', (SHEETS_MAX_CELLS - 40_000) / 20, 20],
+    expect(plan.grid.map((r) => [r.tab.title, r.rows, r.cols, r.range])).toEqual([
+      ['Wide', perTabRows, SHEETS_MAX_COLUMNS_PER_TAB, `'Wide'!A1:IV${perTabRows}`],
+      // Requests don't share the budget: it is charged on what comes back
+      ['Next', 10, SHEETS_MAX_COLUMNS_PER_TAB, "'Next'!A1:IV10"],
+      ['Empty', 0, 0, ''],
     ]);
+    expect(plan.batches.map((b) => b.map((r) => r.tab.title))).toEqual([['Wide', 'Next']]);
+    expect(plan.overCalls).toEqual([]);
   });
 
-  it('packs row-aligned chunks into batches of at most SHEETS_BATCH_MAX_CELLS', () => {
-    const plan = planRead([tabOf({ title: 'T', rowCount: 100, columnCount: 256 }, 0)], FILE_ID);
-    const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / 256);
-    expect(plan.batches.map((b) => b.map((c) => [c.r1, c.r2]))).toEqual([
-      [[1, rowsPerBatch]],
-      [[rowsPerBatch + 1, 2 * rowsPerBatch]],
-      [[2 * rowsPerBatch + 1, 100]],
-    ]);
+  it('gives a tab request at most the cells it is given', () => {
+    const tab = tabOf({ title: 'T', rowCount: 100_000, columnCount: 26 }, 0);
+    expect(tabRequest(tab, SHEETS_MAX_CELLS).rows).toBe(Math.floor(SHEETS_MAX_CELLS / 26));
+    expect(tabRequest(tab, 26 * 7 + 25).rows).toBe(7);
+    expect(tabRequest(tab, 25)).toMatchObject({ rows: 0, range: '' });
   });
 
-  it('fits the two-tab worst case (195 × 256, then 1 × 80) in SHEETS_MAX_VALUE_CALLS', () => {
-    const plan = planRead([
-      tabOf({ title: 'A', rowCount: 195, columnCount: 256 }, 0),
-      tabOf({ title: 'B', rowCount: 1, columnCount: 80 }, 1),
-    ], FILE_ID);
-    expect(plan.overBudget).toEqual([]);
-    expect(plan.plans.map((p) => p.rows)).toEqual([195, 1]);
-    expect(plan.batches.length).toBeLessThanOrEqual(SHEETS_MAX_VALUE_CALLS);
-  });
-
-  it('never exceeds the call, batch or cell bounds over random tab shapes', () => {
+  it('never exceeds the call, URL or per-tab cell bounds over random tab shapes', () => {
     let seed = 42;
     const rand = (n: number) => {
       seed = (seed * 1103515245 + 12345) % 2 ** 31;
       return seed % n;
     };
     for (let trial = 0; trial < 500; trial++) {
-      const tabs = Array.from({ length: 1 + rand(12) }, (_, i) =>
+      const tabs = Array.from({ length: 1 + rand(rand(2) ? 12 : 200) }, (_, i) =>
         tabOf({
           title: `Tab ${i} ${'x'.repeat(rand(60))}`,
-          rowCount: 1 + rand(rand(2) ? 50 : 5000),
-          columnCount: 1 + rand(rand(2) ? 20 : 400),
+          rowCount: rand(rand(2) ? 50 : 200_000),
+          columnCount: rand(rand(2) ? 26 : 400),
         }, i));
       const plan = planRead(tabs, FILE_ID);
 
       expect(plan.batches.length).toBeLessThanOrEqual(SHEETS_MAX_VALUE_CALLS);
-      let total = 0;
-      const nextRow = new Map<string, number>();
-      for (const batch of plan.batches) {
-        const cells = batch.reduce((n, c) => n + (c.r2 - c.r1 + 1) * c.plan.cols, 0);
-        expect(cells).toBeLessThanOrEqual(SHEETS_BATCH_MAX_CELLS);
-        total += cells;
-        for (const c of batch) {
-          expect(c.r1).toBe(nextRow.get(c.plan.tab.title) ?? 1);
-          nextRow.set(c.plan.tab.title, c.r2 + 1);
-        }
+      const requested = plan.batches.flat();
+      for (const r of requested) {
+        expect(r.rows * r.cols).toBeLessThanOrEqual(SHEETS_MAX_CELLS);
+        expect(r.cols).toBeLessThanOrEqual(SHEETS_MAX_COLUMNS_PER_TAB);
       }
-      expect(total).toBeLessThanOrEqual(SHEETS_MAX_CELLS);
-      for (const p of plan.plans) if (p.rows) expect(nextRow.get(p.tab.title)).toBe(p.rows + 1);
+      for (const batch of plan.batches) {
+        expect(batch.length).toBeGreaterThan(0);
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${FILE_ID}/values:batchGet?` +
+          new URLSearchParams([...batch.map((r) => ['ranges', r.range]), ['valueRenderOption', 'FORMATTED_VALUE'], ['majorDimension', 'ROWS']]);
+        expect(url.length).toBeLessThanOrEqual(SHEETS_MAX_URL_CHARS);
+      }
+      // Every non-empty grid tab is requested once, in sheet order, or left out past the call cap
+      const nonEmpty = tabs.filter((t) => t.rowCount > 0 && t.columnCount > 0).map((t) => t.title);
+      expect([...requested.map((r) => r.tab.title), ...plan.overCalls.map((t) => t.title)]).toEqual(nonEmpty);
+      if (plan.overCalls.length) expect(plan.batches).toHaveLength(SHEETS_MAX_VALUE_CALLS);
     }
   });
 
-  it('closes a batch before its URL passes SHEETS_MAX_URL_CHARS', () => {
+  it('splits into consecutive calls before a URL passes SHEETS_MAX_URL_CHARS', () => {
     const tabs = Array.from({ length: 150 }, (_, i) =>
       tabOf({ title: `Quarterly report — region ${i} ${'é'.repeat(60)}`, rowCount: 5, columnCount: 4 }, i));
     const plan = planRead(tabs, FILE_ID);
     expect(plan.batches.length).toBeGreaterThan(1);
     expect(plan.batches.length).toBeLessThanOrEqual(SHEETS_MAX_VALUE_CALLS);
+    expect(plan.batches.flat().map((r) => r.tab.title)).toEqual(tabs.slice(0, plan.batches.flat().length).map((t) => t.title));
     for (const batch of plan.batches) {
       const url = `https://sheets.googleapis.com/v4/spreadsheets/${FILE_ID}/values:batchGet?` +
-        new URLSearchParams([...batch.map((c) => ['ranges', c.range]), ['valueRenderOption', 'FORMATTED_VALUE'], ['majorDimension', 'ROWS']]);
+        new URLSearchParams([...batch.map((r) => ['ranges', r.range]), ['valueRenderOption', 'FORMATTED_VALUE'], ['majorDimension', 'ROWS']]);
       expect(url.length).toBeLessThanOrEqual(SHEETS_MAX_URL_CHARS);
     }
   });
@@ -352,65 +334,101 @@ describe('readSheet', () => {
     expect(text).toContain('`````csv\nrun ```` this\n`````');
   });
 
-  it('splits a tab larger than one batch into row chunks and reassembles them, empty rows at the boundary kept', async () => {
-    const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
-    const rows = rowsPerBatch * 2 + 5;
-    const data = grid(rows, 2);
-    // Last row of the first chunk and first row of the second are empty
-    data[rowsPerBatch - 1] = [];
-    data[rowsPerBatch] = [];
-    const fake = fakeSheets([{ title: 'Big', rowCount: rows, columnCount: SHEETS_MAX_COLUMNS_PER_TAB, data }]);
-
+  it('reads default 1000 × 26 grids with a few rows each in one call, every tab whole, no bounded note (D20)', async () => {
+    const tabs: FakeTab[] = Array.from({ length: 6 }, (_, i) => ({
+      title: `Tab ${i}`,
+      rowCount: 1000,
+      columnCount: 26,
+      data: [[`mark-${i}`, 'b'], [], ['c', '', 'e']],
+    }));
+    const fake = fakeSheets(tabs);
     const text = await readText();
 
-    expect(fake.batchUrls()).toHaveLength(3);
-    const csv = tabCsv(text, 'Big');
-    expect(csv).toHaveLength(rows);
-    expect(csv[0]).toBe('r1c1,r1c2');
-    expect(csv[rowsPerBatch - 2]).toBe(`r${rowsPerBatch - 1}c1,r${rowsPerBatch - 1}c2`);
-    expect(csv[rowsPerBatch - 1]).toBe(',');
-    expect(csv[rowsPerBatch]).toBe(',');
-    expect(csv[rowsPerBatch + 1]).toBe(`r${rowsPerBatch + 2}c1,r${rowsPerBatch + 2}c2`);
-    expect(csv[rows - 1]).toBe(`r${rows}c1,r${rows}c2`);
+    expect(fake.batchUrls()).toHaveLength(1);
+    expect(new URL(fake.batchUrls()[0]).searchParams.getAll('ranges')).toEqual(tabs.map((t) => `'${t.title}'!A1:Z1000`));
+    for (const [i, t] of tabs.entries()) expect(tabCsv(text, t.title)).toEqual([`mark-${i},b,`, ',,', 'c,,e']);
+    expect(text).not.toContain('Read rows');
+    expect(text).not.toContain('Not read');
   });
 
-  it('reads the two-tab worst case in SHEETS_MAX_VALUE_CALLS calls', async () => {
+  it('charges the budget on returned cells: the tab that crosses it is cut with the kept rows, later tabs are over', async () => {
+    const width = 30;
+    const rows = (SHEETS_MAX_CELLS * 3) / 5 / width;
+    const keep = Math.floor((SHEETS_MAX_CELLS - rows * width) / width);
     const fake = fakeSheets([
-      { title: 'A', rowCount: 195, columnCount: 256, data: [['a']] },
-      { title: 'B', rowCount: 1, columnCount: 80, data: [['b']] },
+      { title: 'First', rowCount: rows, columnCount: width, data: grid(rows, width, (r, c) => (c === 1 ? `${r}` : '1')) },
+      { title: 'Second', sheetId: 9, rowCount: rows, columnCount: width, data: grid(rows, width, (r, c) => (c === 1 ? `${r}` : '1')) },
+      { title: 'Third', rowCount: 3, columnCount: 2, data: [['t']] },
     ]);
     const text = await readText();
-    expect(fake.batchUrls().length).toBeLessThanOrEqual(SHEETS_MAX_VALUE_CALLS);
-    expect(tabCsv(text, 'B')).toEqual(['b']);
+
+    expect(fake.batchUrls()).toHaveLength(1);
+    expect(tabCsv(text, 'First')).toHaveLength(rows);
+    const second = tabCsv(text, 'Second');
+    expect(second).toHaveLength(keep);
+    expect(second[keep - 1]).toBe([`${keep}`, ...Array(width - 1).fill('1')].join(','));
+    expect(text).toContain(
+      `Read rows 1–${keep} and columns A–${columnLetter(width)} of a grid of ${rows} rows × ${width} columns. ` +
+      `Cells outside that range aren't included (they may be empty). Open the sheet for the rest: ${LINK}#gid=9`,
+    );
+    expect(text.match(/Read rows/g)).toHaveLength(1);
+    expect(text).not.toContain('# Third');
+    expect(text).toContain(`Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read: 'Third'. Open the sheet to see them: ${LINK}`);
   });
 
-  it('adds the bounded-range note when the rectangle is smaller than the grid, also when it returns nothing', async () => {
+  it('charges the width Sheets returned, not the grid width', async () => {
+    // Default 1000 × 26 grids with 2 columns of data: charged 2 cells a row, so
+    // this many tabs spend the budget exactly and the next one is over it
+    const charged = 1000 * 2;
+    const fits = Math.floor(SHEETS_MAX_CELLS / charged);
+    const tabs: FakeTab[] = Array.from({ length: fits + 1 }, (_, i) => ({
+      title: `T${i}`,
+      rowCount: 1000,
+      columnCount: 26,
+      data: grid(1000, 2, () => '1'),
+    }));
+    fakeSheets(tabs);
+    const text = await readText();
+    for (const t of tabs.slice(0, fits)) expect(tabCsv(text, t.title)).toHaveLength(1000);
+    expect(text).not.toContain('Read rows');
+    expect(text).toContain(`Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read: 'T${fits}'.`);
+  });
+
+  it('requests a tall tab up to one cell budget, with the bounded note', async () => {
+    const rows = Math.floor(SHEETS_MAX_CELLS / 26);
+    const fake = fakeSheets([{ title: 'Tall', rowCount: 100_000, columnCount: 26, data: [['top']] }]);
+    const text = await readText();
+    expect(new URL(fake.batchUrls()[0]).searchParams.getAll('ranges')).toEqual([`'Tall'!A1:Z${rows}`]);
+    expect(tabCsv(text, 'Tall')).toEqual(['top']);
+    expect(text).toContain(`Read rows 1–${rows} and columns A–Z of a grid of 100000 rows × 26 columns.`);
+  });
+
+  it('adds the bounded-range note when the request is smaller than the grid, also when it returns nothing', async () => {
     const data: string[][] = [];
     data[0] = [];
     data[0][299] = 'far right';
-    fakeSheets([
-      { title: 'Sparse', sheetId: 77, rowCount: 3, columnCount: 300, data },
-      { title: 'Tall', rowCount: 100_000, columnCount: 1, data: [['top']] },
-    ]);
+    const fake = fakeSheets([{ title: 'Sparse', sheetId: 77, rowCount: 3, columnCount: 300, data }]);
     const text = await readText();
 
+    expect(new URL(fake.batchUrls()[0]).searchParams.getAll('ranges')).toEqual([
+      `'Sparse'!A1:${columnLetter(SHEETS_MAX_COLUMNS_PER_TAB)}3`,
+    ]);
     expect(tabCsv(text, 'Sparse')).toEqual([]);
     expect(text).toContain(
       "Read rows 1–3 and columns A–IV of a grid of 3 rows × 300 columns. Cells outside that range aren't included " +
       `(they may be empty). Open the sheet for the rest: ${LINK}#gid=77`,
     );
-    const tallRows = SHEETS_MAX_CELLS - 3 * 256;
-    expect(text).toContain(`Read rows 1–${tallRows} and columns A–A of a grid of 100000 rows × 1 columns.`);
   });
 
-  it('lists a tab over the cell budget as left out', async () => {
-    fakeSheets([
-      { title: 'Huge', rowCount: 10_000, columnCount: 256, data: [['h']] },
-      // 195 rows × 256 leave 80 cells: less than one row of 100 columns
-      { title: 'Late', rowCount: 5, columnCount: 100, data: [['l']] },
+  it('renders an empty grid as an empty tab without requesting it', async () => {
+    const fake = fakeSheets([
+      { title: 'None', rowCount: 0, columnCount: 0 },
+      { title: 'Some', rowCount: 2, columnCount: 2, data: [['s']] },
     ]);
     const text = await readText();
-    expect(text).toContain(`Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read: 'Late'. Open the sheet to see them: ${LINK}`);
+    expect(new URL(fake.batchUrls()[0]).searchParams.getAll('ranges')).toEqual(["'Some'!A1:B2"]);
+    expect(tabCsv(text, 'None')).toEqual([]);
+    expect(tabCsv(text, 'Some')).toEqual(['s']);
   });
 
   it('handles many tabs: every tab is rendered or named, calls and URLs stay bounded', async () => {
@@ -432,48 +450,80 @@ describe('readSheet', () => {
   });
 
   describe('byte caps', () => {
-    it('returns the D9 reason when the first batch passes the per-call cap, before parsing all of it', async () => {
+    // Response bytes for a tab: this share of the per-call cap
+    const heavy = (share: number) => Math.floor(SHEETS_MAX_BYTES_PER_CALL * share);
+
+    it('returns the D9 reason when the first call is one tab over the per-call cap, before parsing all of it', async () => {
       const big = 'x'.repeat(SHEETS_MAX_BYTES_PER_CALL);
       const fake = fakeSheets([{ title: 'Long', rowCount: 2, columnCount: 1, data: [[big], [big]] }], { stream: true });
       const result = await readSheet(ctx());
       expect(result).toEqual({ detailsOnly: expect.stringContaining('too large') });
       expect(fake.stats.pulled).toBeLessThan(fake.stats.total);
+      expect(fake.batchUrls()).toHaveLength(1);
     });
 
-    it('keeps the rows of earlier chunks as a partial range when a later chunk passes the cap', async () => {
-      const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
-      const data = grid(rowsPerBatch * 2, 1);
-      data[rowsPerBatch] = ['y'.repeat(SHEETS_MAX_BYTES_PER_CALL)];
-      fakeSheets([
-        { title: 'Wide', rowCount: rowsPerBatch * 2, columnCount: SHEETS_MAX_COLUMNS_PER_TAB, data },
-        { title: 'After', rowCount: 1, columnCount: 1, data: [['z']] },
-      ], { stream: true });
-
+    it('falls back to one tab per call when a multi-tab call passes the cap', async () => {
+      const fake = fakeSheets(['A', 'B', 'C'].map((title) => ({ title, rowCount: 1000, columnCount: 26, data: [['v'], ['x']], padBytes: heavy(0.4) })), { stream: true });
       const text = await readText();
-      expect(tabCsv(text, 'Wide')).toHaveLength(rowsPerBatch);
-      expect(text).toContain(`Partial: rows 1–${rowsPerBatch} arrived before the size limit was reached.`);
-      expect(text).toContain(`Not read, the response size limit was reached: 'After'.`);
+
+      const urls = fake.batchUrls();
+      expect(urls).toHaveLength(4);
+      expect(new URL(urls[0]).searchParams.getAll('ranges')).toHaveLength(3);
+      expect(urls.slice(1).map((u) => new URL(u).searchParams.getAll('ranges'))).toEqual([
+        ["'A'!A1:Z1000"], ["'B'!A1:Z1000"], ["'C'!A1:Z1000"],
+      ]);
+      for (const title of ['A', 'B', 'C']) expect(tabCsv(text, title)).toHaveLength(2);
+      expect(text).not.toContain('Not read');
+      expect(text).not.toContain('Read rows');
     });
 
-    it('stops at the per-read cap across calls', async () => {
-      const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
-      const perBatch = Math.floor(SHEETS_MAX_BYTES_PER_CALL * 0.9);
-      const calls = Math.ceil(SHEETS_MAX_BYTES_PER_READ / perBatch) + 1;
-      // One tab per batch, each carrying one heavy cell
-      const tabs: FakeTab[] = Array.from({ length: calls }, (_, i) => ({
+    it('caps each per-tab call at the cells left and notes the rows read', async () => {
+      const width = 30;
+      const rows = (SHEETS_MAX_CELLS * 3) / 5 / width;
+      const left = SHEETS_MAX_CELLS - rows * width;
+      const fake = fakeSheets([
+        { title: 'Full', rowCount: rows, columnCount: width, data: grid(rows, width, () => '1') },
+        { title: 'Heavy', rowCount: 10, columnCount: 1, data: [['h']], padBytes: heavy(1) },
+        { title: 'Later', rowCount: 1000, columnCount: 26, data: [['l']] },
+      ], { stream: true });
+      const text = await readText();
+
+      const ranges = fake.batchUrls().slice(1).map((u) => new URL(u).searchParams.getAll('ranges')[0]);
+      expect(ranges).toEqual([`'Full'!A1:AD${rows}`, "'Heavy'!A1:A10", `'Later'!A1:Z${Math.floor(left / 26)}`]);
+      expect(tabCsv(text, 'Full')).toHaveLength(rows);
+      expect(tabCsv(text, 'Later')).toEqual(['l']);
+      expect(text).toContain(`Read rows 1–${Math.floor(left / 26)} and columns A–Z of a grid of 1000 rows × 26 columns.`);
+      expect(text).toContain("Not read, the response size limit was reached: 'Heavy'.");
+    });
+
+    it('lists a per-tab call over the cap as too large and still reads later tabs', async () => {
+      fakeSheets([
+        { title: 'Huge', rowCount: 10, columnCount: 1, data: [['h']], padBytes: heavy(1) },
+        { title: 'Small', rowCount: 5, columnCount: 2, data: [['s', 't']] },
+      ], { stream: true });
+      const text = await readText();
+      expect(text).not.toContain('# Huge');
+      expect(tabCsv(text, 'Small')).toEqual(['s,t']);
+      expect(text).toContain(`Not read, the response size limit was reached: 'Huge'. Open the sheet to see them: ${LINK}`);
+    });
+
+    it.each([0.4, 0.9])('never passes SHEETS_MAX_VALUE_CALLS or the per-read cap in the fallback (tabs at %s of the per-call cap)', async (share) => {
+      const tabs: FakeTab[] = Array.from({ length: SHEETS_MAX_VALUE_CALLS * 2 }, (_, i) => ({
         title: `T${i}`,
-        rowCount: rowsPerBatch,
-        columnCount: SHEETS_MAX_COLUMNS_PER_TAB,
-        data: [['w'.repeat(perBatch)]],
+        rowCount: 1000,
+        columnCount: 26,
+        data: [['v']],
+        padBytes: heavy(share),
       }));
       const fake = fakeSheets(tabs, { stream: true });
-
       const text = await readText();
-      const arrived = Math.floor(SHEETS_MAX_BYTES_PER_READ / perBatch);
-      expect(fake.batchUrls()).toHaveLength(arrived + 1);
-      const notRead = tabs.slice(arrived).map((t) => `'${t.title}'`).join(', ');
+
+      expect(fake.batchUrls()).toHaveLength(SHEETS_MAX_VALUE_CALLS);
+      const rendered = tabs.filter((t) => text.includes(`# ${t.title}\n`));
+      expect(rendered.length * heavy(share)).toBeLessThanOrEqual(SHEETS_MAX_BYTES_PER_READ);
+      expect(rendered.map((t) => t.title)).toEqual(tabs.slice(0, rendered.length).map((t) => t.title));
+      const notRead = tabs.slice(rendered.length).map((t) => `'${t.title}'`).join(', ');
       expect(text).toContain(`Not read, the response size limit was reached: ${notRead}.`);
-      expect(fake.stats.pulled).toBeLessThan(fake.stats.total);
       expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
     });
   });
@@ -496,23 +546,35 @@ describe('readSheet', () => {
     expect(text).toContain(`Not included, the ${MAX_TEXT_CHARS}-character limit was reached: 'Next'.`);
   });
 
-  it.each([false, true])('keeps the bounded-range and partial notes on a tab cut at the character cap (later batch over the byte cap: %s)', async (byteCap) => {
-    const rows = 1000;
-    const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
-    const data = grid(rows, 1, (r) => `${r}:${'w'.repeat(6000)}`);
-    if (byteCap) data[rowsPerBatch] = ['y'.repeat(SHEETS_MAX_BYTES_PER_CALL)];
-    fakeSheets([{ title: 'Wide', rowCount: rows, columnCount: 300, data }], { stream: byteCap });
+  it('keeps the bounded-range note on a tab cut at the character cap', async () => {
+    const perTabRows = Math.floor(SHEETS_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
+    fakeSheets([{ title: 'Wide', rowCount: 1000, columnCount: 300, data: grid(1000, 1, (r) => `${r}:${'w'.repeat(6000)}`) }]);
     const text = await readText();
 
     expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
     expect((text.match(/^```/gm) ?? []).length % 2).toBe(0);
     const csv = tabCsv(text, 'Wide');
     expect(csv.length).toBeGreaterThan(0);
-    expect(csv.length).toBeLessThan(rowsPerBatch);
-    expect(text).toMatch(/Read rows 1–\d+ and columns A–IV of a grid of 1000 rows × 300 columns\./);
+    expect(csv.length).toBeLessThan(perTabRows);
+    expect(text).toContain(`Read rows 1–${perTabRows} and columns A–IV of a grid of 1000 rows × 300 columns.`);
     expect(text).toContain(`Cropped: 'Wide' shows rows 1–${csv.length} of what was read`);
-    if (byteCap) expect(text).toContain(`Partial: rows 1–${rowsPerBatch} arrived before the size limit was reached.`);
-    else expect(text).not.toContain('Partial:');
+  });
+
+  it('keeps the kept-rows note on a tab cut at the cell budget and then at the character cap', async () => {
+    const before = SHEETS_MAX_CELLS - 50;
+    fakeSheets([
+      { title: 'Ids', rowCount: before, columnCount: 1, data: grid(before, 1, () => '1') },
+      { title: 'Long', rowCount: 1000, columnCount: 1, data: grid(1000, 1, (r) => `${r}:${'w'.repeat(6000)}`) },
+    ]);
+    const text = await readText();
+
+    expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
+    expect((text.match(/^```/gm) ?? []).length % 2).toBe(0);
+    const csv = tabCsv(text, 'Long');
+    expect(csv.length).toBeGreaterThan(0);
+    expect(csv.length).toBeLessThan(50);
+    expect(text).toContain('Read rows 1–50 and columns A–A of a grid of 1000 rows × 1 columns.');
+    expect(text).toContain(`Cropped: 'Long' shows rows 1–${csv.length} of what was read`);
   });
 
   it.each([
@@ -586,15 +648,19 @@ describe('keyed-link fallback (D19)', () => {
     expect(fake.calls.some((c) => c.url.includes('/export?'))).toBe(false);
   });
 
-  it('drops partial Sheets output when a later batch returns 404', async () => {
-    const rowsPerBatch = Math.floor(SHEETS_BATCH_MAX_CELLS / SHEETS_MAX_COLUMNS_PER_TAB);
-    fakeSheets(
-      [{ title: 'Big', rowCount: rowsPerBatch * 2, columnCount: SHEETS_MAX_COLUMNS_PER_TAB, data: grid(rowsPerBatch * 2, 1) }],
-      { failBatch: { n: 2, status: 404 }, export: csvExport },
-    );
+  it('drops partial Sheets output when a later call returns 404', async () => {
+    // Long tab names split the ranges over more than one call
+    const tabs: FakeTab[] = Array.from({ length: 150 }, (_, i) => ({
+      title: `Quarterly report — region ${i} ${'é'.repeat(60)}`,
+      rowCount: 5,
+      columnCount: 4,
+      data: [['v']],
+    }));
+    const fake = fakeSheets(tabs, { failBatch: { n: 2, status: 404 }, export: csvExport });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const text = await readText({ resourceKey: 'k1' });
-    expect(text).not.toContain('# Big');
+    expect(fake.batchUrls()).toHaveLength(2);
+    expect(text).not.toContain('# Quarterly');
     expect(text).toContain('# Budget (first tab only)');
   });
 

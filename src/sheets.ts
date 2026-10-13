@@ -8,7 +8,6 @@ import { MAX_TEXT_CHARS } from './pdfText.js';
 import { codeFence, sliceChars, stripBom } from './resourceText.js';
 import { log } from './log.js';
 import {
-  SHEETS_BATCH_MAX_CELLS,
   SHEETS_MAX_BYTES_PER_CALL,
   SHEETS_MAX_BYTES_PER_READ,
   SHEETS_MAX_CELLS,
@@ -32,25 +31,23 @@ export interface SheetTab {
   columnCount: number;
 }
 
-// The rectangle read from one grid tab: rows 1..rows, columns A..cols
-export interface TabPlan {
+// One grid tab's request: rows 1..rows and columns A..cols, as one range of a
+// values.batchGet call. An empty grid (0 rows or 0 columns) has rows = cols = 0
+// and no range: it isn't requested and is rendered as an empty tab
+export interface TabRequest {
   tab: SheetTab;
   rows: number;
   cols: number;
-}
-
-// Rows r1..r2 of one tab, requested as one range of a values.batchGet call
-export interface Chunk {
-  plan: TabPlan;
-  r1: number;
-  r2: number;
   range: string;
 }
 
 export interface ReadPlan {
-  plans: TabPlan[];
-  batches: Chunk[][];
-  overBudget: SheetTab[];
+  // Every grid tab, in sheet order
+  grid: TabRequest[];
+  // The requested tabs, in sheet order, one values.batchGet call each
+  batches: TabRequest[][];
+  // Tabs past SHEETS_MAX_VALUE_CALLS when the ranges are split by URL length
+  overCalls: SheetTab[];
   nonGrid: SheetTab[];
 }
 
@@ -87,101 +84,55 @@ export function batchGetUrl(fileId: string, ranges: string[]): string {
   return `${SHEETS_API}/${encodeURIComponent(fileId)}/values:batchGet?${params}`;
 }
 
+// A whole tab, within maxCells: cols = min(columnCount,
+// SHEETS_MAX_COLUMNS_PER_TAB), rows = min(rowCount, ⌊maxCells / cols⌋)
+export function tabRequest(tab: SheetTab, maxCells: number): TabRequest {
+  const cols = Math.min(tab.columnCount, SHEETS_MAX_COLUMNS_PER_TAB);
+  if (cols <= 0 || tab.rowCount <= 0) return { tab, rows: 0, cols: 0, range: '' };
+  const rows = Math.min(tab.rowCount, Math.floor(maxCells / cols));
+  return { tab, rows, cols, range: rows > 0 ? a1Range(tab.title, 1, rows, cols) : '' };
+}
+
 /**
- * D16 allocation and batching. Grid tabs get cells in sheet order: at most
- * SHEETS_MAX_COLUMNS_PER_TAB columns each and SHEETS_MAX_CELLS in total; a tab
- * that gets 0 rows is over budget. The rectangles are cut into row-aligned
- * chunks and packed in order into batches of at most SHEETS_BATCH_MAX_CELLS
- * cells (and SHEETS_MAX_URL_CHARS of URL). A tab's rows can split across
- * batches, a row never does. Past SHEETS_MAX_VALUE_CALLS batches, the tab being
- * packed keeps the rows that fit and later tabs are over budget
+ * D16/D20 requests. Every grid tab, in sheet order, is requested whole as one
+ * range (at most SHEETS_MAX_COLUMNS_PER_TAB columns and SHEETS_MAX_CELLS
+ * cells). The ranges go into one values.batchGet call, split into consecutive
+ * calls only where the URL would pass SHEETS_MAX_URL_CHARS. Tabs that would
+ * need more than SHEETS_MAX_VALUE_CALLS calls are left out. The cell budget is
+ * charged later, on what comes back
  */
 export function planRead(tabs: SheetTab[], fileId: string): ReadPlan {
   const sorted = [...tabs].sort((a, b) => a.index - b.index);
   const nonGrid = sorted.filter((t) => t.sheetType !== 'GRID');
-  const overBudget: SheetTab[] = [];
-  const allocated: TabPlan[] = [];
-
-  let remaining = SHEETS_MAX_CELLS;
-  for (const tab of sorted) {
-    if (tab.sheetType !== 'GRID') continue;
-    const cols = Math.min(tab.columnCount, SHEETS_MAX_COLUMNS_PER_TAB);
-    if (cols <= 0 || tab.rowCount <= 0) {
-      // An empty grid: nothing to request, rendered as an empty tab
-      allocated.push({ tab, rows: 0, cols: 0 });
-      continue;
-    }
-    const rows = Math.min(tab.rowCount, Math.floor(remaining / cols));
-    if (rows <= 0) {
-      overBudget.push(tab);
-      continue;
-    }
-    allocated.push({ tab, rows, cols });
-    remaining -= rows * cols;
-  }
+  const grid = sorted.filter((t) => t.sheetType === 'GRID').map((t) => tabRequest(t, SHEETS_MAX_CELLS));
 
   const baseUrlLength = batchGetUrl(fileId, []).length;
   const rangeCost = (range: string) => new URLSearchParams({ ranges: range }).toString().length + 1;
 
-  const batches: Chunk[][] = [];
-  const plans: TabPlan[] = [];
-  let batch: Chunk[] = [];
-  let cells = 0;
+  const batches: TabRequest[][] = [];
+  const overCalls: SheetTab[] = [];
+  let batch: TabRequest[] = [];
   let urlLength = baseUrlLength;
   let full = false;
 
-  for (const plan of allocated) {
-    if (plan.rows === 0) {
-      plans.push(plan);
-      continue;
+  for (const request of grid) {
+    if (request.rows === 0) continue;
+    if (!full && batch.length && urlLength + rangeCost(request.range) > SHEETS_MAX_URL_CHARS) {
+      batches.push(batch);
+      batch = [];
+      urlLength = baseUrlLength;
+      full = batches.length >= SHEETS_MAX_VALUE_CALLS;
     }
     if (full) {
-      overBudget.push(plan.tab);
+      overCalls.push(request.tab);
       continue;
     }
-
-    let r1 = 1;
-    while (r1 <= plan.rows) {
-      const fitRows = Math.floor((SHEETS_BATCH_MAX_CELLS - cells) / plan.cols);
-      const take = Math.min(fitRows, plan.rows - r1 + 1);
-      const range = take > 0 ? a1Range(plan.tab.title, r1, r1 + take - 1, plan.cols) : '';
-      const fitsUrl = take > 0 && (batch.length === 0 || urlLength + rangeCost(range) <= SHEETS_MAX_URL_CHARS);
-
-      if (!fitsUrl) {
-        // Close this batch; open a new one unless that would pass the call cap
-        batches.push(batch);
-        batch = [];
-        cells = 0;
-        urlLength = baseUrlLength;
-        if (batches.length >= SHEETS_MAX_VALUE_CALLS) {
-          full = true;
-          break;
-        }
-        continue;
-      }
-
-      batch.push({ plan, r1, r2: r1 + take - 1, range });
-      cells += take * plan.cols;
-      urlLength += rangeCost(range);
-      r1 += take;
-    }
-
-    const packedRows = r1 - 1;
-    if (packedRows === 0) {
-      overBudget.push(plan.tab);
-    } else {
-      const packed = packedRows === plan.rows ? plan : { ...plan, rows: packedRows };
-      // Chunks already made point at the original plan; keep them pointing at
-      // the one that is rendered
-      if (packed !== plan) {
-        for (const b of [...batches, batch]) for (const c of b) if (c.plan === plan) c.plan = packed;
-      }
-      plans.push(packed);
-    }
+    batch.push(request);
+    urlLength += rangeCost(request.range);
   }
   if (batch.length) batches.push(batch);
 
-  return { plans, batches, overBudget, nonGrid };
+  return { grid, batches, overCalls, nonGrid };
 }
 
 // RFC 4180: a field with a comma, quote, CR or LF is quoted, quotes doubled
@@ -206,11 +157,68 @@ export function normalizeRows(rows: Array<string[] | undefined>): string[][] {
   return out;
 }
 
-interface TabResult {
-  plan: TabPlan;
-  rows: Array<string[] | undefined>;
-  // Last row of the last chunk that arrived; chunks of a tab arrive in order
-  arrivedThrough: number;
+// What became of one grid tab, in sheet order: rendered (noteRows set when the
+// tab gets the bounded-range note, with the rows it says were read), or left
+// out over the cell budget or the response size limit
+type TabOutcome =
+  | { tab: SheetTab; rows: string[][]; cols: number; noteRows?: number }
+  | { tab: SheetTab; leftOut: 'budget' | 'size' };
+
+type TabResolution = { request: TabRequest; values: unknown[] } | { leftOut: 'budget' | 'size' };
+
+/**
+ * D20: charges SHEETS_MAX_CELLS on the cells Sheets returned, in sheet order.
+ * Tabs are settled as their values arrive (always in sheet order) and charged
+ * returnedRows × returnedWidth after normalizeRows. The tab that crosses the
+ * budget keeps ⌊remaining / width⌋ rows; later tabs are over the budget
+ */
+class CellLedger {
+  remaining = SHEETS_MAX_CELLS;
+  readonly outcomes: TabOutcome[] = [];
+  private next = 0;
+  private readonly resolved = new Map<SheetTab, TabResolution>();
+
+  constructor(private readonly grid: TabRequest[]) {}
+
+  get spent(): boolean {
+    return this.remaining <= 0;
+  }
+
+  settle(tab: SheetTab, resolution: TabResolution): void {
+    this.resolved.set(tab, resolution);
+    while (this.next < this.grid.length) {
+      const request = this.grid[this.next];
+      if (request.rows === 0) {
+        this.outcomes.push({ tab: request.tab, rows: [], cols: 0 });
+      } else {
+        const res = this.resolved.get(request.tab);
+        if (!res) return;
+        this.outcomes.push(this.charge(request.tab, res));
+      }
+      this.next++;
+    }
+  }
+
+  private charge(tab: SheetTab, res: TabResolution): TabOutcome {
+    if ('leftOut' in res) return { tab, leftOut: res.leftOut };
+    if (this.spent) return { tab, leftOut: 'budget' };
+    const { request } = res;
+    const rows = normalizeRows(
+      res.values.slice(0, request.rows).map((row) =>
+        Array.isArray(row) ? row.slice(0, request.cols).map((v) => (v == null ? '' : String(v))) : [],
+      ),
+    );
+    const width = rows[0]?.length ?? 0;
+    const bounded = request.rows < tab.rowCount || request.cols < tab.columnCount;
+    if (rows.length * width <= this.remaining) {
+      this.remaining -= rows.length * width;
+      return { tab, rows, cols: request.cols, ...(bounded ? { noteRows: request.rows } : {}) };
+    }
+    const keep = Math.floor(this.remaining / width);
+    this.remaining = 0;
+    if (keep === 0) return { tab, leftOut: 'budget' };
+    return { tab, rows: rows.slice(0, keep), cols: request.cols, noteRows: keep };
+  }
 }
 
 const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
@@ -274,33 +282,72 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<SheetRead> {
   });
 
   const plan = planRead(tabs, ctx.fileId);
-  const results = new Map<TabPlan, TabResult>(
-    plan.plans.map((p) => [p, { plan: p, rows: [], arrivedThrough: 0 }]),
-  );
+  const ledger = new CellLedger(plan.grid);
+  const leaveOut = (requests: TabRequest[], leftOut: 'budget' | 'size') => {
+    for (const r of requests) ledger.settle(r.tab, { leftOut });
+  };
+  let calls = 0;
 
-  for (const [i, batch] of plan.batches.entries()) {
-    let data: any;
-    try {
-      data = await fetchJson(batchGetUrl(ctx.fileId, batch.map((c) => c.range)));
-    } catch (err) {
-      if (!(err instanceof ResponseTooLargeError)) throw err;
-      if (i === 0) return { detailsOnly: sizeLimitReason() };
-      // Dropped: tabs with earlier chunks keep them as a partial range, tabs
-      // with none are listed as too large
+  const fetchValues = async (requests: TabRequest[]) => {
+    calls++;
+    const data = await fetchJson(batchGetUrl(ctx.fileId, requests.map((r) => r.range)));
+    const valueRanges: any[] = Array.isArray(data?.valueRanges) ? data.valueRanges : [];
+    requests.forEach((request, j) => {
+      const values: unknown[] = Array.isArray(valueRanges[j]?.values) ? valueRanges[j].values : [];
+      ledger.settle(request.tab, { request, values });
+    });
+  };
+
+  // Usually one call for every tab; more only where the URL got too long
+  let fallback: TabRequest[] = [];
+  for (const [b, batch] of plan.batches.entries()) {
+    if (ledger.spent) {
+      leaveOut(plan.batches.slice(b).flat(), 'budget');
       break;
     }
-    const valueRanges: any[] = Array.isArray(data?.valueRanges) ? data.valueRanges : [];
-    batch.forEach((chunk, j) => {
-      const result = results.get(chunk.plan)!;
-      const values: unknown[] = Array.isArray(valueRanges[j]?.values) ? valueRanges[j].values : [];
-      values.slice(0, chunk.r2 - chunk.r1 + 1).forEach((row, k) => {
-        result.rows[chunk.r1 - 1 + k] = Array.isArray(row) ? row.map((v) => (v == null ? '' : String(v))) : [];
-      });
-      result.arrivedThrough = chunk.r2;
-    });
+    try {
+      await fetchValues(batch);
+    } catch (err) {
+      if (!(err instanceof ResponseTooLargeError)) throw err;
+      if (batch.length > 1) {
+        fallback = plan.batches.slice(b).flat();
+        break;
+      }
+      if (calls === 1) return { detailsOnly: sizeLimitReason() };
+      ledger.settle(batch[0].tab, { leftOut: 'size' });
+    }
   }
 
-  return { text: renderSheet(ctx, plan, [...results.values()]) };
+  // A multi-tab call passed the byte cap: one tab per call, in sheet order,
+  // each within the cells still left, until the calls, the budget or the
+  // per-read bytes run out
+  for (const [i, whole] of fallback.entries()) {
+    const rest = fallback.slice(i);
+    if (ledger.spent) {
+      leaveOut(rest, 'budget');
+      break;
+    }
+    if (calls >= SHEETS_MAX_VALUE_CALLS || used >= SHEETS_MAX_BYTES_PER_READ) {
+      leaveOut(rest, 'size');
+      break;
+    }
+    const request = tabRequest(whole.tab, ledger.remaining);
+    if (request.rows === 0) {
+      // Fewer cells left than one row of this tab: it and later tabs are over
+      leaveOut(rest, 'budget');
+      break;
+    }
+    try {
+      await fetchValues([request]);
+    } catch (err) {
+      if (!(err instanceof ResponseTooLargeError)) throw err;
+      ledger.settle(whole.tab, { leftOut: 'size' });
+    }
+  }
+
+  for (const tab of plan.overCalls) ledger.settle(tab, { leftOut: 'budget' });
+
+  return { text: renderSheet(ctx, plan.nonGrid, ledger.outcomes) };
 }
 
 function sizeLimitReason(): string {
@@ -330,21 +377,20 @@ function nameListNote(prefix: string, names: string[], suffix: string, maxChars:
 // Markdown for every tab, closing notes, all within MAX_TEXT_CHARS: tab
 // sections within the limit minus TEXT_NOTES_RESERVE_CHARS, notes within the
 // reserve
-function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): string {
+function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutcome[]): string {
   const contentBudget = MAX_TEXT_CHARS - TEXT_NOTES_RESERVE_CHARS;
   const sections: string[] = [];
   let used = 0;
   let cropNote = '';
+  const overBudget: string[] = [];
   const tooLarge: string[] = [];
   const charCapped: string[] = [];
   let charCapHit = false;
 
-  for (const result of results) {
-    const { plan: tabPlan } = result;
-    const { tab } = tabPlan;
-    const arrivedAll = result.arrivedThrough >= tabPlan.rows;
-    if (!arrivedAll && result.arrivedThrough === 0) {
-      tooLarge.push(quoteName(tab.title));
+  for (const outcome of outcomes) {
+    const { tab } = outcome;
+    if ('leftOut' in outcome) {
+      (outcome.leftOut === 'budget' ? overBudget : tooLarge).push(quoteName(tab.title));
       continue;
     }
     if (charCapHit) {
@@ -352,24 +398,19 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
       continue;
     }
 
-    // Dense: rows Sheets trimmed inside a chunk become empty rows
-    const rows = normalizeRows(Array.from({ length: result.arrivedThrough }, (_, i) => result.rows[i]));
-    const lines = rows.map(csvRow);
+    const lines = outcome.rows.map(csvRow);
     const csv = lines.join('\n');
     const fence = codeFence(csv);
     const heading = `# ${tab.title}${tab.hidden ? ' (hidden)' : ''}`;
     const tabLink = `${ctx.link}#gid=${tab.sheetId}`;
 
     const tabNotes: string[] = [];
-    if (tabPlan.cols > 0 && (tabPlan.rows < tab.rowCount || tabPlan.cols < tab.columnCount)) {
+    if (outcome.noteRows !== undefined) {
       tabNotes.push(
-        `Read rows 1–${tabPlan.rows} and columns A–${columnLetter(tabPlan.cols)} of a grid of ` +
+        `Read rows 1–${outcome.noteRows} and columns A–${columnLetter(outcome.cols)} of a grid of ` +
         `${tab.rowCount} rows × ${tab.columnCount} columns. Cells outside that range aren't included ` +
         `(they may be empty). Open the sheet for the rest: ${tabLink}`,
       );
-    }
-    if (!arrivedAll) {
-      tabNotes.push(`Partial: rows 1–${result.arrivedThrough} arrived before the size limit was reached.`);
     }
 
     const sep = sections.length ? '\n\n' : '';
@@ -383,8 +424,8 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
       continue;
     }
 
-    // Cut at a row boundary: the most rows whose section, range and partial
-    // notes included (R7), still fits
+    // Cut at a row boundary: the most rows whose section, bounded-range note
+    // included (R7), still fits
     charCapHit = true;
     const shell = `${sep}${heading}\n\n${fence}csv\n${fence}${notesText}`.length;
     let room = contentBudget - used - shell;
@@ -409,18 +450,18 @@ function renderSheet(ctx: SheetsContext, plan: ReadPlan, results: TabResult[]): 
   // Notes share the reserve; each gets a slice, name lists shorten to fit
   const pending: Array<(max: number) => string> = [];
   if (cropNote) pending.push((max) => sliceChars(cropNote, max));
-  if (plan.nonGrid.length) {
+  if (nonGrid.length) {
     pending.push((max) => nameListNote(
       "Skipped tabs that aren't grids (no cells to read)",
-      plan.nonGrid.map((t) => `${quoteName(t.title)} (${t.sheetType})`),
+      nonGrid.map((t) => `${quoteName(t.title)} (${t.sheetType})`),
       '',
       max,
     ));
   }
-  if (plan.overBudget.length) {
+  if (overBudget.length) {
     pending.push((max) => nameListNote(
       `Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read`,
-      plan.overBudget.map((t) => quoteName(t.title)),
+      overBudget,
       `Open the sheet to see them: ${ctx.link}`,
       max,
     ));
