@@ -17,6 +17,13 @@ export type Profile = {
   features: readonly string[];
 };
 
+// A profile resolved for the running server. null means unrestricted: every
+// tool and feature registers
+export type Grant = {
+  scopes: Set<string>;
+  features: Set<string>;
+};
+
 const STANDARD_SCOPES = [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE];
 const ALL_FEATURES = Object.values(FEATURES);
 
@@ -67,22 +74,21 @@ function resolveProfile(profile: string | undefined): Profile | null {
   return resolved;
 }
 
+export function resolveGrant(profile = process.env.PROFILE): Grant | null {
+  const resolved = resolveProfile(profile);
+  if (resolved === null) return null;
+  return { scopes: expandScopes(resolved.scopes), features: new Set(resolved.features) };
+}
+
 export function grantedScopes(profile = process.env.PROFILE): Set<string> | null {
-  const resolved = resolveProfile(profile);
-  return resolved === null ? null : expandScopes(resolved.scopes);
+  return resolveGrant(profile)?.scopes ?? null;
 }
 
-export function grantedFeatures(profile = process.env.PROFILE): Set<string> | null {
-  const resolved = resolveProfile(profile);
-  return resolved === null ? null : new Set(resolved.features);
+export function isToolGranted(toolScope: string | undefined, grant: Grant | null): boolean {
+  if (grant === null || !toolScope) return true;
+  return grant.scopes.has(toolScope);
 }
 
-export function isFeatureGranted(feature: string, granted: Set<string> | null): boolean {
-  return granted === null || granted.has(feature);
-}
-
-export function isToolGranted(toolScope: string | undefined, granted: Set<string> | null): boolean {
-  if (granted === null) return true;
-  if (!toolScope) return true;
-  return granted.has(toolScope);
+export function isFeatureGranted(feature: string, grant: Grant | null): boolean {
+  return grant === null || grant.features.has(feature);
 }

@@ -18,7 +18,7 @@ async function callTool(fetchImpl: () => Promise<Response>) {
   vi.stubGlobal("fetch", vi.fn(fetchImpl));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
-  await createServer(null, null).connect(serverTransport);
+  await createServer(null).connect(serverTransport);
   await client.connect(clientTransport);
   const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   const result = await requestContext.run({ accessToken: "tok-" + SECRET } as any, () =>
@@ -157,7 +157,7 @@ describe("logToolSurface", () => {
 
   it("writes one JSON line with the scopes and tools", () => {
     const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    logToolSurface(null, null);
+    logToolSurface(null);
     expect(written).toHaveBeenCalledTimes(1);
     const record = JSON.parse(String(written.mock.calls[0][0]));
     expect(record).toMatchObject({ level: "info", event: "tool_surface", scopes: "unrestricted", withheld: [] });
@@ -180,7 +180,7 @@ describe("get_file PDF extraction failure", () => {
     }));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test", version: "0.0.0" });
-    await createServer(null, null).connect(serverTransport);
+    await createServer(null).connect(serverTransport);
     await client.connect(clientTransport);
     const written = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 

@@ -81,7 +81,7 @@ describe('makeDriveRequest bytes mode', () => {
   it('returns the body unchanged and does not ask for JSON', async () => {
     const body = Buffer.from([0x7b, 0xff, 0xfe, 0x00, 0x7d]);
     const calls = stubFetch([['/files/x/export', () => new Response(body, { status: 200 })]]);
-    const out = await makeDriveRequest('/files/x/export', 'tok', {}, 'bytes');
+    const out = await makeDriveRequest('/files/x/export', 'tok', {}, { responseType: 'bytes' });
     expect(Buffer.isBuffer(out) && out.equals(body)).toBe(true);
     expect((calls[0].init?.headers as Record<string, string>).Accept).toBeUndefined();
   });
@@ -93,13 +93,13 @@ describe('makeDriveRequest maxBytes cap', () => {
   it('parses a body at the cap as before', async () => {
     const body = JSON.stringify({ ok: true });
     stubFetch([['/x', () => new Response(body, { status: 200 })]]);
-    await expect(makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: body.length })).resolves.toEqual({ ok: true });
+    await expect(makeDriveRequest('/x', 'tok', {}, { maxBytes: body.length })).resolves.toEqual({ ok: true });
   });
 
   it('returns raw bytes in bytes mode', async () => {
     const body = Buffer.from([1, 2, 3]);
     stubFetch([['/x', () => new Response(body, { status: 200 })]]);
-    const out = await makeDriveRequest('/x', 'tok', {}, 'bytes', { maxBytes: 3 });
+    const out = await makeDriveRequest('/x', 'tok', {}, { responseType: 'bytes', maxBytes: 3 });
     expect(Buffer.isBuffer(out) && out.equals(body)).toBe(true);
   });
 
@@ -113,7 +113,7 @@ describe('makeDriveRequest maxBytes cap', () => {
       },
     });
     stubFetch([['/x', () => new Response(stream, { status: 200 })]]);
-    const err = await makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: 4096 }).catch((e) => e);
+    const err = await makeDriveRequest('/x', 'tok', {}, { maxBytes: 4096 }).catch((e) => e);
     expect(err).toBeInstanceOf(ResponseTooLargeError);
     expect(err.maxBytes).toBe(4096);
     expect(pulled).toBeLessThan(100);
@@ -121,12 +121,12 @@ describe('makeDriveRequest maxBytes cap', () => {
 
   it('rejects up front when Content-Length is already over the cap', async () => {
     stubFetch([['/x', () => new Response('x'.repeat(10), { status: 200, headers: { 'content-length': '10' } })]]);
-    await expect(makeDriveRequest('/x', 'tok', {}, 'bytes', { maxBytes: 9 })).rejects.toBeInstanceOf(ResponseTooLargeError);
+    await expect(makeDriveRequest('/x', 'tok', {}, { responseType: 'bytes', maxBytes: 9 })).rejects.toBeInstanceOf(ResponseTooLargeError);
   });
 
   it('leaves error bodies to the usual DriveApiError path', async () => {
     stubFetch([['/x', () => new Response(JSON.stringify({ error: { message: 'nope', errors: [{ reason: 'notFound' }] } }), { status: 404 })]]);
-    const err = await makeDriveRequest('/x', 'tok', {}, 'json', { maxBytes: 1 }).catch((e) => e);
+    const err = await makeDriveRequest('/x', 'tok', {}, { maxBytes: 1 }).catch((e) => e);
     expect(err).toBeInstanceOf(DriveApiError);
     expect(err.status).toBe(404);
   });

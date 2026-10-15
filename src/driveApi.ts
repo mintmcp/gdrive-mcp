@@ -41,7 +41,17 @@ function errorClass(err: Error): string | undefined {
 }
 
 // status-specific hints so the LLM can self-correct
-export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
+export interface DriveErrorInfo {
+  error: string;
+  status?: number;
+  reason?: string;
+  code?: string;
+  hint?: string;
+}
+
+// The message and hint for a failed Drive call, whatever threw: the tool
+// result and the MCP resource error are both built from it
+export function describeDriveError(err: unknown): DriveErrorInfo {
   let status: number | undefined;
   let reason: string | undefined;
   let code: string | undefined;
@@ -83,14 +93,17 @@ export function formatDriveError(err: unknown): { content: Array<{ type: 'text';
       break;
   }
 
-  const payload: any = { error: message };
-  if (status !== undefined) payload.status = status;
-  if (reason) payload.reason = reason;
-  if (code) payload.code = code;
-  if (hint) payload.hint = hint;
+  const info: DriveErrorInfo = { error: message };
+  if (status !== undefined) info.status = status;
+  if (reason) info.reason = reason;
+  if (code) info.code = code;
+  if (hint) info.hint = hint;
+  return info;
+}
 
+export function formatDriveError(err: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   return {
-    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    content: [{ type: 'text', text: JSON.stringify(describeDriveError(err)) }],
     isError: true,
   };
 }
@@ -170,22 +183,54 @@ async function readCapped(response: Response, maxBytes: number): Promise<Buffer>
   return Buffer.concat(chunks, total);
 }
 
-export interface DriveRequestLimits {
-  // Opt-in: read a 2xx body as a stream and throw ResponseTooLargeError once
-  // it passes this many bytes. Unset keeps the plain whole-body read
+export interface DriveResponseOptions {
+  // `bytes` returns the raw body for downloads such as files.export, which
+  // text decoding would corrupt. Default: JSON, or the text of a non-JSON body
+  responseType?: 'json' | 'bytes';
+  // Read a 2xx body as a stream and throw ResponseTooLargeError once it passes
+  // this many bytes. Unset keeps the plain whole-body read
   maxBytes?: number;
 }
 
+// The request's resource-key header (older link-shared files need it on every
+// call) and abort signal, for a call about one file
+export function driveRequestInit(file: { id: string; resourceKey?: string }, signal?: AbortSignal): RequestInit {
+  return {
+    ...(signal ? { signal } : {}),
+    ...(file.resourceKey ? { headers: { 'X-Goog-Drive-Resource-Keys': `${file.id}/${file.resourceKey}` } } : {}),
+  };
+}
+
+export const EXPORT_LIMIT_MESSAGE = "The export is over Google's 10 MB export limit.";
+
+// files.export as bytes, or null when the file is over Google's export limit
+export async function exportFile(
+  fileId: string,
+  mimeType: string,
+  accessToken: string,
+  init: RequestInit = {},
+): Promise<Buffer | null> {
+  try {
+    return await makeDriveRequest(
+      `/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(mimeType)}`,
+      accessToken,
+      init,
+      { responseType: 'bytes' },
+    );
+  } catch (err) {
+    if (err instanceof DriveApiError && err.status === 403 && err.reason === 'exportSizeLimitExceeded') return null;
+    throw err;
+  }
+}
+
 // throws DriveApiError on non-2xx; retries 429 and (for safe methods) 5xx
-// with bounded backoff honouring Retry-After. `bytes` returns the raw body for
-// downloads such as files.export, which text decoding would corrupt.
-// options.signal reaches fetch and also ends a retry wait early
+// with bounded backoff honouring Retry-After. options.signal reaches fetch and
+// also ends a retry wait early
 export async function makeDriveRequest(
   endpoint: string,
   accessToken: string,
   options: RequestInit = {},
-  responseType: 'json' | 'bytes' = 'json',
-  limits: DriveRequestLimits = {},
+  { responseType = 'json', maxBytes }: DriveResponseOptions = {},
 ): Promise<any> {
   const url = endpoint.startsWith('http') ? endpoint : `${GOOGLE_DRIVE_API}${endpoint}`;
   const method = (options.method || 'GET').toUpperCase();
@@ -202,24 +247,14 @@ export async function makeDriveRequest(
       },
     });
 
-    if (response.ok && limits.maxBytes !== undefined) {
-      const body = await readCapped(response, limits.maxBytes);
+    if (response.ok) {
+      const body = maxBytes === undefined
+        ? Buffer.from(await response.arrayBuffer())
+        : await readCapped(response, maxBytes);
       if (responseType === 'bytes') return body;
+      // no-content responses (e.g. some DELETE/PATCH)
       if (response.status === 204 || body.length === 0) return null;
       const text = body.toString('utf8');
-      try {
-        return JSON.parse(text);
-      } catch {
-        return text;
-      }
-    }
-
-    if (response.ok) {
-      if (responseType === 'bytes') return Buffer.from(await response.arrayBuffer());
-      // no-content responses (e.g. some DELETE/PATCH)
-      if (response.status === 204) return null;
-      const text = await response.text();
-      if (!text) return null;
       try {
         return JSON.parse(text);
       } catch {

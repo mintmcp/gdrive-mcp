@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { capText, codeFence, detailsOnlyText, sliceChars, stripBom, typeName } from './resourceText.js';
-import { MAX_TEXT_CHARS } from './pdfText.js';
+import { MAX_TEXT_CHARS } from './limits.js';
 
 const LINK = 'https://drive.google.com/file/d/abcdefghijk/view';
 

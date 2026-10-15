@@ -16,16 +16,25 @@ import {
   type Resource,
 } from '@modelcontextprotocol/sdk/types.js';
 import { getAccessToken, NOT_CONNECTED_MESSAGE } from './auth.js';
-import { DriveApiError, ResponseTooLargeError, formatDriveError, makeDriveRequest } from './driveApi.js';
+import {
+  DriveApiError,
+  EXPORT_LIMIT_MESSAGE,
+  ResponseTooLargeError,
+  describeDriveError,
+  driveRequestInit,
+  exportFile,
+  makeDriveRequest,
+} from './driveApi.js';
 import { parseDriveUri, type DriveUri } from './driveUri.js';
 import { fetchLabelsMeta } from './labels.js';
 import { errorFields, log, truncate } from './log.js';
 import { EXTRACT_TIMEOUT_MS, extractPdfText, type PdfText } from './pdfText.js';
-import { capText, detailsOnlyText, sliceChars, stripBom, typeName } from './resourceText.js';
+import { TEXTUAL_APPLICATION_MIMES, classifyMime } from './mime.js';
+import { capText, detailsOnlyText, sliceChars, stripBom, typeName, type TextRead } from './resourceText.js';
 import { readSheet } from './sheets.js';
-import { MAX_FILE_SIZE, TEXTUAL_APPLICATION_MIMES, classifyMime } from './tools.js';
 import {
   FOLDER_LISTING_PAGE_SIZE,
+  MAX_FILE_SIZE,
   RESOURCE_LIST_DEADLINE_MS,
   RESOURCE_LIST_MAX_EXTRA_PAGES,
   RESOURCE_LIST_PAGE_SIZE,
@@ -101,20 +110,13 @@ function requireAccessToken(): string {
   return accessToken;
 }
 
-function driveInit(signal: AbortSignal, file?: DriveUri): RequestInit {
-  return {
-    signal,
-    ...(file?.resourceKey ? { headers: { 'X-Goog-Drive-Resource-Keys': `${file.id}/${file.resourceKey}` } } : {}),
-  };
-}
-
-// §3.4: our own McpErrors pass through; Google errors keep formatDriveError's
+// §3.4: our own McpErrors pass through; Google errors keep describeDriveError's
 // text, so a 401 still says to reconnect
 function toMcpError(err: unknown): McpError {
   if (err instanceof McpError) return err;
   if (err instanceof DeadlineError) return new McpError(ErrorCode.InternalError, err.message);
-  const payload = JSON.parse(formatDriveError(err).content[0].text);
-  const message = [payload.error, payload.hint].filter(Boolean).join(' ');
+  const { error, hint } = describeDriveError(err);
+  const message = [error, hint].filter(Boolean).join(' ');
   const code = err instanceof DriveApiError && err.status === 404 ? RESOURCE_NOT_FOUND : ErrorCode.InternalError;
   return new McpError(code, message);
 }
@@ -272,6 +274,8 @@ export async function readResource(uri: string): Promise<ReadResourceResult> {
   );
 }
 
+const OVER_FILE_LIMIT = `The file is over the ${MAX_FILE_SIZE / (1024 * 1024)} MB limit for reading.`;
+
 async function readContent(
   uri: string,
   file: DriveUri,
@@ -279,7 +283,7 @@ async function readContent(
   signal: AbortSignal,
   deadlineAt: number,
 ): Promise<Content> {
-  const init = driveInit(signal, file);
+  const init = driveRequestInit(file, signal);
   const meta = await makeDriveRequest(
     `/files/${encodeURIComponent(file.id)}?fields=id,name,mimeType,size,webViewLink,exportLinks&supportsAllDrives=true`,
     accessToken,
@@ -290,87 +294,91 @@ async function readContent(
   const link: string = meta?.webViewLink || uri;
   const size = parseDriveSize(meta?.size);
 
-  const text = (body: string, type = 'text/markdown'): Content => ({ uri, mimeType: type, text: body });
-  const detailsOnly = (why: string): Content =>
-    text(detailsOnlyText({ name, mimeType, ...(size !== undefined ? { size } : {}), link, why }));
-
-  const exportText = async (exportMimeType: string): Promise<string | null> => {
-    try {
-      const bytes: Buffer = await makeDriveRequest(
-        `/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(exportMimeType)}`,
-        accessToken,
-        init,
-        'bytes',
-      );
-      return stripBom(bytes.toString('utf8'));
-    } catch (err) {
-      if (err instanceof DriveApiError && err.status === 403 && err.reason === 'exportSizeLimitExceeded') return null;
-      throw err;
-    }
+  const read = await readByType({ file, accessToken, init, signal, deadlineAt, name, mimeType, link, size });
+  if ('text' in read) return { uri, mimeType: read.mimeType ?? 'text/markdown', text: read.text };
+  return {
+    uri,
+    mimeType: 'text/markdown',
+    text: detailsOnlyText({ name, mimeType, ...(size !== undefined ? { size } : {}), link, why: read.detailsOnly }),
   };
-  const overExportLimit = "The export is over Google's 10 MB export limit.";
+}
+
+type FileRead = {
+  file: DriveUri;
+  accessToken: string;
+  init: RequestInit;
+  signal: AbortSignal;
+  deadlineAt: number;
+  name: string;
+  mimeType: string;
+  link: string;
+  size: number | undefined;
+};
+
+async function readByType(r: FileRead): Promise<TextRead> {
+  const exported = async (exportMimeType: string): Promise<string | null> => {
+    const bytes = await exportFile(r.file.id, exportMimeType, r.accessToken, r.init);
+    return bytes && stripBom(bytes.toString('utf8'));
+  };
 
   // Bytes of a file stored as-is, or null when it's over MAX_FILE_SIZE
   const download = async (): Promise<Buffer | null> => {
-    if (size !== undefined && size > MAX_FILE_SIZE) return null;
+    if (r.size !== undefined && r.size > MAX_FILE_SIZE) return null;
     try {
       return await makeDriveRequest(
-        `/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`,
-        accessToken,
-        init,
-        'bytes',
-        { maxBytes: MAX_FILE_SIZE },
+        `/files/${encodeURIComponent(r.file.id)}?alt=media&supportsAllDrives=true`,
+        r.accessToken,
+        r.init,
+        { responseType: 'bytes', maxBytes: MAX_FILE_SIZE },
       );
     } catch (err) {
       if (err instanceof ResponseTooLargeError) return null;
       throw err;
     }
   };
-  const overFileLimit = `The file is over the ${MAX_FILE_SIZE / (1024 * 1024)} MB limit for reading.`;
 
-  if (mimeType === DOC) {
-    const body = await exportText('text/markdown');
-    return body === null ? detailsOnly(overExportLimit) : text(capText(body, link));
+  if (r.mimeType === DOC) {
+    const body = await exported('text/markdown');
+    return body === null ? { detailsOnly: EXPORT_LIMIT_MESSAGE } : { text: capText(body, r.link) };
   }
 
-  if (mimeType === SLIDES) {
-    const body = await exportText('text/plain');
-    return body === null ? detailsOnly(overExportLimit) : text(capText(body, link), 'text/plain');
+  if (r.mimeType === SLIDES) {
+    const body = await exported('text/plain');
+    return body === null ? { detailsOnly: EXPORT_LIMIT_MESSAGE } : { text: capText(body, r.link), mimeType: 'text/plain' };
   }
 
-  if (mimeType === SHEET) {
-    const result = await readSheet({
-      fileId: file.id,
-      accessToken,
-      ...(file.resourceKey ? { resourceKey: file.resourceKey } : {}),
-      signal,
-      name,
-      link,
+  if (r.mimeType === SHEET) {
+    return readSheet({
+      fileId: r.file.id,
+      accessToken: r.accessToken,
+      ...(r.file.resourceKey ? { resourceKey: r.file.resourceKey } : {}),
+      signal: r.signal,
+      name: r.name,
+      link: r.link,
     });
-    return 'text' in result ? text(result.text) : detailsOnly(result.detailsOnly);
   }
 
-  if (mimeType === FOLDER) {
-    return text(await folderListing(file, accessToken, init, name, link));
+  if (r.mimeType === FOLDER) {
+    return { text: await folderListing(r.file, r.accessToken, r.init, r.name, r.link) };
   }
 
-  const kind = classifyMime(mimeType);
+  const kind = classifyMime(r.mimeType);
 
   if (kind === 'pdf') {
     const bytes = await download();
-    if (!bytes) return detailsOnly(overFileLimit);
-    return readPdf(bytes, { signal, deadlineAt, link, text, detailsOnly });
+    if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
+    return readPdf(bytes, r.signal, r.deadlineAt, r.link);
   }
 
   if (kind === 'text') {
     const bytes = await download();
-    if (!bytes) return detailsOnly(overFileLimit);
-    return text(capText(stripBom(bytes.toString('utf8')), link), mimeType);
+    if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
+    return { text: capText(stripBom(bytes.toString('utf8')), r.link), mimeType: r.mimeType };
   }
 
   throw new ResourceError(
     RESOURCE_NOT_FOUND,
-    `'${sliceChars(name, 200)}' (${typeName(mimeType)}) can't be added as text. Open it directly: ${link}`,
+    `'${sliceChars(r.name, 200)}' (${typeName(r.mimeType)}) can't be added as text. Open it directly: ${r.link}`,
     'unsupported_type',
   );
 }
@@ -381,17 +389,8 @@ async function readContent(
  * abandoned extraction runs on until the extractor's own timeout stops it, and
  * its result is discarded
  */
-async function readPdf(
-  bytes: Buffer,
-  read: {
-    signal: AbortSignal;
-    deadlineAt: number;
-    link: string;
-    text: (body: string, type?: string) => Content;
-    detailsOnly: (why: string) => Content;
-  },
-): Promise<Content> {
-  const timeoutMs = Math.max(0, Math.min(EXTRACT_TIMEOUT_MS, read.deadlineAt - Date.now()));
+async function readPdf(bytes: Buffer, signal: AbortSignal, deadlineAt: number, link: string): Promise<TextRead> {
+  const timeoutMs = Math.max(0, Math.min(EXTRACT_TIMEOUT_MS, deadlineAt - Date.now()));
   const byteLength = bytes.byteLength;
   let pdf: PdfText | undefined;
   let failure: string | undefined;
@@ -405,8 +404,8 @@ async function readPdf(
   } catch (err: any) {
     // Precedence: past the deadline, the outcome is the timeout (withDeadline
     // turns this throw into it, even before its timer has fired)
-    read.signal.throwIfAborted();
-    if (Date.now() >= read.deadlineAt) throw err;
+    signal.throwIfAborted();
+    if (Date.now() >= deadlineAt) throw err;
     failure = err?.message || 'the PDF could not be parsed';
     log('error', 'pdf_extraction_failed', {
       ...errorFields(err),
@@ -414,24 +413,24 @@ async function readPdf(
       elapsedMs: Date.now() - startedAt,
     });
   }
-  read.signal.throwIfAborted();
+  signal.throwIfAborted();
 
   if (!pdf) {
-    return read.detailsOnly(`Text couldn't be extracted from this PDF because ${truncate(failure ?? '', 200)}.`);
+    return { detailsOnly: `Text couldn't be extracted from this PDF because ${truncate(failure ?? '', 200)}.` };
   }
   if (pdf.scanned) {
-    return read.detailsOnly(
-      `It's a scanned (image-only) PDF with ${pdf.pages} page(s) and no text layer, so there is no text to extract.`,
-    );
+    return {
+      detailsOnly: `It's a scanned (image-only) PDF with ${pdf.pages} page(s) and no text layer, so there is no text to extract.`,
+    };
   }
   const notes: string[] = [];
   if (pdf.textPages < pdf.pages) {
     notes.push(
       `Note: only ${pdf.textPages} of ${pdf.pages} page(s) carry a text layer; the rest appear to be scanned ` +
-      `images and are not included. Full file: ${read.link}`,
+      `images and are not included. Full file: ${link}`,
     );
   }
-  return read.text(capText(pdf.text, read.link, { notes, truncated: pdf.truncated }), 'text/plain');
+  return { text: capText(pdf.text, link, { notes, truncated: pdf.truncated }), mimeType: 'text/plain' };
 }
 
 function escapeLinkText(name: string): string {

@@ -1,7 +1,11 @@
 // Text helpers shared by the resources/read branches: code fences, the D10
 // truncation with its note, the D9 details-only text, and type names
 
-import { MAX_TEXT_CHARS } from './pdfText.js';
+import { MAX_TEXT_CHARS } from './limits.js';
+
+// What one resources/read branch produces: the text (Markdown unless a
+// mimeType says otherwise), or the reason for a D9 details-only text instead
+export type TextRead = { text: string; mimeType?: string } | { detailsOnly: string };
 
 // A fence longer than any backtick run in the text, so the text can't close it
 export function codeFence(text: string): string {

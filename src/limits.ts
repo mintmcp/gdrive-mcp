@@ -1,10 +1,15 @@
-// Budgets, deadlines and page sizes for MCP resources (resources/list and
-// resources/read). Every tunable number of the resource code lives here, and
-// tests derive their fixtures from these names, so changing a value is a
-// one-line edit. The text cap (MAX_TEXT_CHARS) and file cap (MAX_FILE_SIZE) are
-// the existing ones shared with get_file and export_file
+// Budgets, deadlines and page sizes for reading files: the caps get_file and
+// export_file share with MCP resources, and the resource-only ones. Tests
+// derive their fixtures from these names, so changing a value is a one-line
+// edit
 
 const MiB = 1024 * 1024;
+
+// The most a file stored as-is is downloaded for reading
+export const MAX_FILE_SIZE = 20 * MiB;
+
+// The most characters of text a read returns, notes and links included
+export const MAX_TEXT_CHARS = 200_000;
 
 // Sheets: the widest column range read from any one tab. Wider tabs are read
 // from column A up to this and carry a bounded-range note

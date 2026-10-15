@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { FEATURES, isFeatureGranted, isToolGranted, SCOPES } from "./scopes.js";
+import { FEATURES, isFeatureGranted, isToolGranted, SCOPES, type Grant } from "./scopes.js";
 import { registerResources } from "./resources.js";
 import { log, truncate } from "./log.js";
 
@@ -14,23 +14,23 @@ const TOOLS = Object.entries(GoogleDriveTools.getTools()) as Array<[string, any]
 // Resources are a profile feature: a connector opts in, so the ones already
 // serving customers keep the surface they were connected with. They read
 // files, so drive.readonly is required as well
-export function resourcesGranted(granted: Set<string> | null, features: Set<string> | null): boolean {
-  return isFeatureGranted(FEATURES.RESOURCES, features) && (granted === null || granted.has(SCOPES.DRIVE_READONLY));
+export function resourcesGranted(grant: Grant | null): boolean {
+  return isFeatureGranted(FEATURES.RESOURCES, grant) && isToolGranted(SCOPES.DRIVE_READONLY, grant);
 }
 
-export function logToolSurface(granted: Set<string> | null, features: Set<string> | null): void {
+export function logToolSurface(grant: Grant | null): void {
   const registered: string[] = [];
   const skipped: string[] = [];
   for (const [toolName, t] of TOOLS) {
-    (isToolGranted(t.handler?.scope, granted) ? registered : skipped).push(toolName);
+    (isToolGranted(t.handler?.scope, grant) ? registered : skipped).push(toolName);
   }
 
   log("info", "tool_surface", {
-    scopes: granted === null ? "unrestricted" : [...granted],
+    scopes: grant === null ? "unrestricted" : [...grant.scopes],
     tools: registered,
     withheld: skipped,
-    features: features === null ? "unrestricted" : [...features],
-    resources: resourcesGranted(granted, features),
+    features: grant === null ? "unrestricted" : [...grant.features],
+    resources: resourcesGranted(grant),
   });
 }
 
@@ -88,11 +88,11 @@ function errorCodes(result: any): { status?: number; reason?: string; code?: str
   };
 }
 
-export function createServer(granted: Set<string> | null, features: Set<string> | null): McpServer {
+export function createServer(grant: Grant | null): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   for (const [toolName, t] of TOOLS) {
-    if (!isToolGranted(t.handler?.scope, granted)) continue;
+    if (!isToolGranted(t.handler?.scope, grant)) continue;
 
     server.registerTool(
       toolName,
@@ -109,7 +109,7 @@ export function createServer(granted: Set<string> | null, features: Set<string> 
     );
   }
 
-  if (resourcesGranted(granted, features)) registerResources(server);
+  if (resourcesGranted(grant)) registerResources(server);
 
   return server;
 }

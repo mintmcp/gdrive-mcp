@@ -1,4 +1,4 @@
-import { makeDriveRequest } from './driveApi.js';
+import { driveRequestInit, makeDriveRequest } from './driveApi.js';
 import { grantedScopes, SCOPES } from './scopes.js';
 import { log, errorFields } from "./log.js";
 
@@ -101,11 +101,7 @@ export async function getFileLabels(
   const wire: WireLabel[] = [];
   let error: FileLabels['error'];
 
-  const listInit: RequestInit = {};
-  if (options.resourceKey) {
-    listInit.headers = { 'X-Goog-Drive-Resource-Keys': `${fileId}/${options.resourceKey}` };
-  }
-  if (options.signal) listInit.signal = options.signal;
+  const listInit = driveRequestInit({ id: fileId, resourceKey: options.resourceKey }, options.signal);
 
   try {
     let pageToken: string | undefined;

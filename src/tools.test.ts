@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  classifyMime,
   escapeDriveQValue,
   isSelfMove,
   validateWorkspaceDomain,
@@ -15,7 +14,8 @@ import {
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
-import { MAX_TEXT_CHARS } from './pdfText.js';
+import { classifyMime } from './mime.js';
+import { MAX_TEXT_CHARS } from './limits.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {

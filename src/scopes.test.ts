@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { FEATURES, PROFILES, SCOPES, expandScopes, grantedFeatures, grantedScopes, isToolGranted } from "./scopes.js";
+import { FEATURES, PROFILES, SCOPES, expandScopes, grantedScopes, isToolGranted, resolveGrant, type Grant } from "./scopes.js";
 import { createServer } from "./server.js";
 
 describe("expandScopes", () => {
@@ -45,26 +45,22 @@ describe("grantedScopes", () => {
   });
 });
 
-describe("grantedFeatures", () => {
-  test("unset means every feature", () => {
-    expect(grantedFeatures(undefined)).toBeNull();
+describe("resolveGrant", () => {
+  test("unset means every tool and feature", () => {
+    expect(resolveGrant(undefined)).toBeNull();
   });
 
   test("standard carries no feature", () => {
-    expect(grantedFeatures("standard")).toEqual(new Set());
+    expect(resolveGrant("standard")?.features).toEqual(new Set());
   });
 
   test("standard-resources has the scopes of standard plus the resources feature", () => {
-    expect(grantedScopes("standard-resources")).toEqual(grantedScopes("standard"));
-    expect(grantedFeatures("standard-resources")).toEqual(new Set([FEATURES.RESOURCES]));
+    expect(resolveGrant("standard-resources")?.scopes).toEqual(grantedScopes("standard"));
+    expect(resolveGrant("standard-resources")?.features).toEqual(new Set([FEATURES.RESOURCES]));
   });
 
   test("full carries every feature", () => {
-    expect(grantedFeatures("full")).toEqual(new Set(Object.values(FEATURES)));
-  });
-
-  test("an unknown profile fails the same way as for scopes", () => {
-    expect(() => grantedFeatures("readonly")).toThrow(/unknown profile/i);
+    expect(resolveGrant("full")?.features).toEqual(new Set(Object.values(FEATURES)));
   });
 
   test("every profile lists only known features", () => {
@@ -76,16 +72,20 @@ describe("grantedFeatures", () => {
 
 describe("isToolGranted", () => {
   test("a tool with no declared scope is always granted", () => {
-    expect(isToolGranted(undefined, new Set())).toBe(true);
+    expect(isToolGranted(undefined, scopesOnly([]))).toBe(true);
   });
 
   test("withholds a tool whose scope is missing", () => {
-    expect(isToolGranted(SCOPES.DRIVE_LABELS_READONLY, expandScopes([SCOPES.DRIVE]))).toBe(false);
+    expect(isToolGranted(SCOPES.DRIVE_LABELS_READONLY, scopesOnly([SCOPES.DRIVE]))).toBe(false);
   });
 });
 
-function toolNames(granted: Set<string> | null): string[] {
-  const server = createServer(granted, null);
+function scopesOnly(scopes: string[]): Grant {
+  return { scopes: expandScopes(scopes), features: new Set() };
+}
+
+function toolNames(grant: Grant | null): string[] {
+  const server = createServer(grant);
   return Object.keys((server as any)._registeredTools ?? {}).sort();
 }
 
@@ -111,22 +111,22 @@ describe("createServer tool surface", () => {
   });
 
   test("the standard profile registers every tool", () => {
-    expect(toolNames(grantedScopes("standard"))).toEqual(ALL_TOOLS);
+    expect(toolNames(resolveGrant("standard"))).toEqual(ALL_TOOLS);
   });
 
   test("the full profile registers every tool, via the implication map", () => {
-    expect(toolNames(grantedScopes("full"))).toEqual(ALL_TOOLS);
+    expect(toolNames(resolveGrant("full"))).toEqual(ALL_TOOLS);
   });
 
   test("every profile's tools are a subset of the unrestricted surface", () => {
     for (const name of Object.keys(PROFILES)) {
-      const tools = toolNames(grantedScopes(name));
+      const tools = toolNames(resolveGrant(name));
       expect(ALL_TOOLS).toEqual(expect.arrayContaining(tools));
     }
   });
 
   test("a read-only grant withholds every write tool", () => {
-    expect(toolNames(expandScopes([SCOPES.DRIVE_READONLY]))).toEqual([
+    expect(toolNames(scopesOnly([SCOPES.DRIVE_READONLY]))).toEqual([
       "export_file",
       "get_file",
       "get_file_metadata",
@@ -137,6 +137,6 @@ describe("createServer tool surface", () => {
   });
 
   test("a grant covering nothing registers nothing", () => {
-    expect(toolNames(expandScopes([SCOPES.DRIVE_LABELS_READONLY]))).toEqual([]);
+    expect(toolNames(scopesOnly([SCOPES.DRIVE_LABELS_READONLY]))).toEqual([]);
   });
 });

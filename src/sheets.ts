@@ -3,11 +3,11 @@
 // tab). A keyed link the Sheets API refuses falls back to Drive's first-tab CSV
 // export (D19)
 
-import { DriveApiError, ResponseTooLargeError, makeDriveRequest } from './driveApi.js';
-import { MAX_TEXT_CHARS } from './pdfText.js';
-import { codeFence, sliceChars, stripBom } from './resourceText.js';
+import { DriveApiError, EXPORT_LIMIT_MESSAGE, ResponseTooLargeError, driveRequestInit, exportFile, makeDriveRequest } from './driveApi.js';
+import { codeFence, sliceChars, stripBom, type TextRead } from './resourceText.js';
 import { log } from './log.js';
 import {
+  MAX_TEXT_CHARS,
   SHEETS_MAX_BYTES_PER_CALL,
   SHEETS_MAX_BYTES_PER_READ,
   SHEETS_MAX_CELLS,
@@ -60,8 +60,6 @@ export interface SheetsContext {
   link: string;
 }
 
-// text: the Markdown to return. detailsOnly: the reason for a D9 text instead
-export type SheetRead = { text: string } | { detailsOnly: string };
 
 // 1 → A, 26 → Z, 27 → AA, 256 → IV
 export function columnLetter(n: number): string {
@@ -160,11 +158,13 @@ export function normalizeRows(rows: Array<string[] | undefined>): string[][] {
 // What became of one grid tab, in sheet order: rendered (noteRows set when the
 // tab gets the bounded-range note, with the rows it says were read), or left
 // out over the cell budget or the response size limit
+type LeftOut = 'budget' | 'size' | 'calls';
+
 type TabOutcome =
   | { tab: SheetTab; rows: string[][]; cols: number; noteRows?: number }
-  | { tab: SheetTab; leftOut: 'budget' | 'size' };
+  | { tab: SheetTab; leftOut: LeftOut };
 
-type TabResolution = { request: TabRequest; values: unknown[] } | { leftOut: 'budget' | 'size' };
+type TabResolution = { request: TabRequest; values: unknown[] } | { leftOut: LeftOut };
 
 /**
  * D20: charges SHEETS_MAX_CELLS on the cells Sheets returned, in sheet order.
@@ -231,13 +231,10 @@ export function isKeyedFallbackError(err: unknown): boolean {
 }
 
 function requestInit(ctx: SheetsContext): RequestInit {
-  return {
-    signal: ctx.signal,
-    ...(ctx.resourceKey ? { headers: { 'X-Goog-Drive-Resource-Keys': `${ctx.fileId}/${ctx.resourceKey}` } } : {}),
-  };
+  return driveRequestInit({ id: ctx.fileId, resourceKey: ctx.resourceKey }, ctx.signal);
 }
 
-export async function readSheet(ctx: SheetsContext): Promise<SheetRead> {
+export async function readSheet(ctx: SheetsContext): Promise<TextRead> {
   try {
     return await readThroughSheetsApi(ctx);
   } catch (err) {
@@ -247,7 +244,7 @@ export async function readSheet(ctx: SheetsContext): Promise<SheetRead> {
   }
 }
 
-async function readThroughSheetsApi(ctx: SheetsContext): Promise<SheetRead> {
+async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
   const init = requestInit(ctx);
   let used = 0;
 
@@ -255,7 +252,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<SheetRead> {
   const fetchJson = async (url: string): Promise<any> => {
     const cap = Math.min(SHEETS_MAX_BYTES_PER_CALL, SHEETS_MAX_BYTES_PER_READ - used);
     if (cap <= 0) throw new ResponseTooLargeError(0);
-    const body: Buffer = await makeDriveRequest(url, ctx.accessToken, init, 'bytes', { maxBytes: cap });
+    const body: Buffer = await makeDriveRequest(url, ctx.accessToken, init, { responseType: 'bytes', maxBytes: cap });
     used += body.length;
     return JSON.parse(body.toString('utf8'));
   };
@@ -283,7 +280,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<SheetRead> {
 
   const plan = planRead(tabs, ctx.fileId);
   const ledger = new CellLedger(plan.grid);
-  const leaveOut = (requests: TabRequest[], leftOut: 'budget' | 'size') => {
+  const leaveOut = (requests: TabRequest[], leftOut: LeftOut) => {
     for (const r of requests) ledger.settle(r.tab, { leftOut });
   };
   let calls = 0;
@@ -345,7 +342,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<SheetRead> {
     }
   }
 
-  for (const tab of plan.overCalls) ledger.settle(tab, { leftOut: 'budget' });
+  for (const tab of plan.overCalls) ledger.settle(tab, { leftOut: 'calls' });
 
   return { text: renderSheet(ctx, plan.nonGrid, ledger.outcomes) };
 }
@@ -382,15 +379,14 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
   const sections: string[] = [];
   let used = 0;
   let cropNote = '';
-  const overBudget: string[] = [];
-  const tooLarge: string[] = [];
+  const leftOut: Record<LeftOut, string[]> = { budget: [], size: [], calls: [] };
   const charCapped: string[] = [];
   let charCapHit = false;
 
   for (const outcome of outcomes) {
     const { tab } = outcome;
     if ('leftOut' in outcome) {
-      (outcome.leftOut === 'budget' ? overBudget : tooLarge).push(quoteName(tab.title));
+      leftOut[outcome.leftOut].push(quoteName(tab.title));
       continue;
     }
     if (charCapHit) {
@@ -415,9 +411,9 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
 
     const sep = sections.length ? '\n\n' : '';
     const notesText = tabNotes.length ? `\n\n${tabNotes.join('\n\n')}` : '';
-    const build = (body: string) =>
-      `${sep}${heading}\n\n${fence}csv\n${body}${body ? '\n' : ''}${fence}${notesText}`;
-    const whole = build(csv);
+    const build = (rows: string[]) =>
+      `${sep}${heading}\n\n${fence}csv\n${rows.join('\n')}${rows.length ? '\n' : ''}${fence}${notesText}`;
+    const whole = build(lines);
     if (used + whole.length <= contentBudget) {
       sections.push(whole);
       used += whole.length;
@@ -427,8 +423,7 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
     // Cut at a row boundary: the most rows whose section, bounded-range note
     // included (R7), still fits
     charCapHit = true;
-    const shell = `${sep}${heading}\n\n${fence}csv\n${fence}${notesText}`.length;
-    let room = contentBudget - used - shell;
+    let room = contentBudget - used - build([]).length;
     let kept = 0;
     let keptLength = 0;
     while (kept < lines.length && keptLength + lines[kept].length + 1 <= room) {
@@ -439,7 +434,7 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
       charCapped.push(quoteName(tab.title));
       continue;
     }
-    const cut = `${sep}${heading}\n\n${fence}csv\n${lines.slice(0, kept).join('\n')}\n${fence}${notesText}`;
+    const cut = build(lines.slice(0, kept));
     sections.push(cut);
     used += cut.length;
     cropNote =
@@ -458,21 +453,14 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
       max,
     ));
   }
-  if (overBudget.length) {
-    pending.push((max) => nameListNote(
-      `Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read`,
-      overBudget,
-      `Open the sheet to see them: ${ctx.link}`,
-      max,
-    ));
-  }
-  if (tooLarge.length) {
-    pending.push((max) => nameListNote(
-      'Not read, the response size limit was reached',
-      tooLarge,
-      `Open the sheet to see them: ${ctx.link}`,
-      max,
-    ));
+  const leftOutPrefix: Record<LeftOut, string> = {
+    budget: `Not read, over the ${SHEETS_MAX_CELLS}-cell budget for one read`,
+    size: 'Not read, the response size limit was reached',
+    calls: `Not read, over the ${SHEETS_MAX_VALUE_CALLS}-call limit for one read`,
+  };
+  for (const kind of ['budget', 'size', 'calls'] as const) {
+    if (!leftOut[kind].length) continue;
+    pending.push((max) => nameListNote(leftOutPrefix[kind], leftOut[kind], `Open the sheet to see them: ${ctx.link}`, max));
   }
   if (charCapped.length) {
     pending.push((max) => nameListNote(
@@ -493,21 +481,9 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
 
 // D19: Drive's CSV export of the first tab, for a keyed link the Sheets API
 // refused
-async function readFirstTabExport(ctx: SheetsContext): Promise<SheetRead> {
-  let bytes: Buffer;
-  try {
-    bytes = await makeDriveRequest(
-      `/files/${encodeURIComponent(ctx.fileId)}/export?mimeType=${encodeURIComponent('text/csv')}`,
-      ctx.accessToken,
-      requestInit(ctx),
-      'bytes',
-    );
-  } catch (err) {
-    if (err instanceof DriveApiError && err.status === 403 && err.reason === 'exportSizeLimitExceeded') {
-      return { detailsOnly: "The export is over Google's 10 MB export limit." };
-    }
-    throw err;
-  }
+async function readFirstTabExport(ctx: SheetsContext): Promise<TextRead> {
+  const bytes = await exportFile(ctx.fileId, 'text/csv', ctx.accessToken, requestInit(ctx));
+  if (!bytes) return { detailsOnly: EXPORT_LIMIT_MESSAGE };
 
   const csv = stripBom(bytes.toString('utf8')).replace(/\r\n/g, '\n').replace(/\n$/, '');
   const fence = codeFence(csv);

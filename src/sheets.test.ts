@@ -11,7 +11,7 @@ import {
   type SheetsContext,
 } from './sheets.js';
 import { DriveApiError } from './driveApi.js';
-import { MAX_TEXT_CHARS } from './pdfText.js';
+import { MAX_TEXT_CHARS } from './limits.js';
 import {
   SHEETS_MAX_BYTES_PER_CALL,
   SHEETS_MAX_BYTES_PER_READ,
@@ -446,7 +446,7 @@ describe('readSheet', () => {
     expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
     const rendered = tabs.filter((t) => text.includes(`# ${t.title}\n`)).length;
     expect(rendered).toBeGreaterThan(0);
-    if (rendered < tabs.length) expect(text).toMatch(/Not read, over the \d+-cell budget for one read: .* more\./);
+    if (rendered < tabs.length) expect(text).toMatch(/Not read, over the \d+-call limit for one read: .* more\./);
   });
 
   describe('byte caps', () => {

@@ -4,9 +4,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { createServer, logToolSurface } from './server.js';
 import { requestContext } from './auth.js';
-import { grantedFeatures, grantedScopes, PROFILES } from './scopes.js';
-import { EXTRACT_TIMEOUT_MS, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
-import { MAX_FILE_SIZE, TEXTUAL_APPLICATION_MIMES } from './tools.js';
+import { FEATURES, PROFILES, resolveGrant } from './scopes.js';
+import { EXTRACT_TIMEOUT_MS, type PdfText } from './pdfText.js';
+import { MAX_FILE_SIZE, MAX_TEXT_CHARS } from './limits.js';
+import { TEXTUAL_APPLICATION_MIMES } from './mime.js';
 import { parseDriveSize, resourceListQuery } from './resources.js';
 import { LABEL_SCHEMA_BODY } from './testStubs.js';
 import {
@@ -85,7 +86,7 @@ async function connect(profile?: string) {
   else process.env.PROFILE = profile;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.0' });
-  await createServer(grantedScopes(), grantedFeatures()).connect(serverTransport);
+  await createServer(resolveGrant()).connect(serverTransport);
   await client.connect(clientTransport);
   return client;
 }
@@ -141,22 +142,22 @@ describe('registration', () => {
     for (const profile of Object.keys(PROFILES)) {
       const client = await connect(profile);
       const advertised = client.getServerCapabilities()?.resources !== undefined;
-      expect(advertised).toBe(grantedFeatures(profile)!.has('resources'));
+      expect(advertised).toBe(resolveGrant(profile)!.features.has(FEATURES.RESOURCES));
     }
   });
 
   it('logs the resource surface with the tool surface', () => {
-    logToolSurface(grantedScopes('standard-resources'), grantedFeatures('standard-resources'));
+    logToolSurface(resolveGrant('standard-resources'));
     expect(records()[0]).toMatchObject({ event: 'tool_surface', features: ['resources'], resources: true });
-    logToolSurface(grantedScopes('standard'), grantedFeatures('standard'));
+    logToolSurface(resolveGrant('standard'));
     expect(records()[1]).toMatchObject({ event: 'tool_surface', features: [], resources: false });
   });
 
   it('withholds resources when drive.readonly is not granted, whatever the feature says', () => {
-    const fileOnly = new Set(['https://www.googleapis.com/auth/drive.file']);
-    logToolSurface(fileOnly, null);
+    const fileOnly = { scopes: new Set(['https://www.googleapis.com/auth/drive.file']), features: new Set([FEATURES.RESOURCES]) };
+    logToolSurface(fileOnly);
     expect(records()[0]).toMatchObject({ resources: false });
-    expect(createServer(fileOnly, null).server.getCapabilities?.()).not.toHaveProperty('resources');
+    expect(createServer(fileOnly).server.getCapabilities?.()).not.toHaveProperty('resources');
   });
 
   it('answers resources/templates/list with an empty list', async () => {

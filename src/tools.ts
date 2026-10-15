@@ -5,34 +5,13 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
-import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
+import { extractPdfText, type PdfText } from './pdfText.js';
+import { classifyMime } from './mime.js';
+import { MAX_FILE_SIZE, MAX_TEXT_CHARS } from './limits.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
 import { resolveExportFormat, exportKind } from './exportFormats.js';
 import { log, errorFields } from "./log.js";
-
-export const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
-
-
-// MIME categorisation for get_file. We derive these from the *actual* metadata
-// mimeType, not from caller-supplied input, so the tool can't be lied into
-// returning garbled output.
-export const TEXTUAL_APPLICATION_MIMES = new Set([
-  'application/json',
-  'application/xml',
-  'application/javascript',
-  'application/yaml',
-  'application/x-yaml',
-]);
-export function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc' | 'unsupported' {
-  if (!mimeType) return 'unsupported';
-  if (mimeType.startsWith('application/vnd.google-apps.')) return 'native-doc';
-  if (mimeType === 'application/pdf') return 'pdf';
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('text/')) return 'text';
-  if (TEXTUAL_APPLICATION_MIMES.has(mimeType)) return 'text';
-  return 'unsupported';
-}
 
 const GOOGLE_NATIVE_SERVERS: Record<string, string> = {
   'application/vnd.google-apps.document': 'Google Docs',
@@ -1064,7 +1043,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               `/files/${encodeURIComponent(file_id)}/export?mimeType=${encodeURIComponent(resolved.mimeType)}`,
               accessToken,
               {},
-              'bytes',
+              { responseType: 'bytes' },
             );
 
             const kind = exportKind(resolved.mimeType);
