@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  classifyMime,
   escapeDriveQValue,
   isSelfMove,
   validateWorkspaceDomain,
-  unsupportedMessage,
   inferMimeTypeFromName,
   decodeUploadContent,
   buildMultipartBody,
@@ -14,8 +12,10 @@ import {
   formatDriveFile,
   GoogleDriveTools,
 } from './tools.js';
+import { classifyMime, unsupportedMessage } from './fileContent.js';
 import { requestContext } from './auth.js';
 import { MAX_TEXT_CHARS } from './pdfText.js';
+import { readFileSync } from 'node:fs';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
@@ -66,13 +66,15 @@ describe('classifyMime', () => {
     expect(classifyMime('audio/mp3')).toBe('unsupported');
     expect(classifyMime('')).toBe('unsupported');
   });
-  it('classifies Office formats as unsupported — they are routed, not read here', () => {
+  it('classifies Office packages as office, and legacy binary Office as unsupported', () => {
     expect(
       classifyMime('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    ).toBe('unsupported');
+    ).toBe('office');
     expect(
       classifyMime('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-    ).toBe('unsupported');
+    ).toBe('office');
+    expect(classifyMime('application/vnd.oasis.opendocument.text')).toBe('office');
+    expect(classifyMime('application/vnd.ms-excel')).toBe('unsupported');
   });
 });
 
@@ -105,25 +107,6 @@ describe('unsupportedMessage', () => {
     expect(msg).toContain(link);
   });
 
-  it('routes Office spreadsheets to the Sheets connector', () => {
-    const msg = unsupportedMessage(
-      'book.xlsx',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      link
-    );
-    expect(msg).toContain('Google Sheets MCP server');
-    expect(msg).toContain(link);
-  });
-
-  it('routes Office documents to the Docs connector', () => {
-    const msg = unsupportedMessage(
-      'notes.docx',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      link
-    );
-    expect(msg).toContain('Google Docs MCP server');
-  });
-
   it('routes a legacy .doc to the Docs connector, which now parses it', () => {
     const msg = unsupportedMessage('old.doc', 'application/msword', link);
     expect(msg).toContain('Google Docs MCP server');
@@ -138,7 +121,7 @@ describe('unsupportedMessage', () => {
   it('explains the supported kinds for ordinary binary files', () => {
     const msg = unsupportedMessage('clip.mp4', 'video/mp4', link);
     expect(msg).toContain('video/mp4');
-    expect(msg).toContain('text, image and PDF');
+    expect(msg).toContain('text, image, PDF and Office');
     expect(msg).toContain(link);
   });
 });
@@ -529,6 +512,50 @@ describe('get_file handler _meta', () => {
     expect(res._meta.applied).toHaveLength(1);
   });
 
+  it('reads a Word document as text', async () => {
+    process.env.PROFILE = 'standard';
+    const docx = readFileSync(new URL('./__fixtures__/tabs.docx', import.meta.url));
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({
+        ...FILE_META, name: 'tabs.docx', size: String(docx.length),
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      })],
+      ['alt=media', () => new Response(docx, { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.extraction).toBe('text');
+    expect(res.structuredContent.content).toContain('SENTINEL-A');
+    expect(res.structuredContent.truncated).toBeUndefined();
+  });
+
+  it('reports an unparseable Office file as a failed extraction, not an error', async () => {
+    process.env.PROFILE = 'standard';
+    stubFetch([
+      ['fields=id,name,mimeType,size,webViewLink', () => jsonResponse({
+        ...FILE_META, name: 'bad.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })],
+      ['alt=media', () => new Response('not a zip', { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent.extraction).toBe('failed');
+    expect(res.structuredContent.message).toContain('package');
+  });
+
+  it('caps a text file at MAX_TEXT_CHARS and says so', async () => {
+    process.env.PROFILE = 'standard';
+    stubFetch([
+      metaRoute,
+      ['alt=media', () => new Response('y'.repeat(MAX_TEXT_CHARS + 5), { status: 200 })],
+    ]);
+    const res = await callGetFile('f1');
+    expect(res.structuredContent.content).toHaveLength(MAX_TEXT_CHARS);
+    expect(res.structuredContent.truncated).toBe(true);
+    expect(res.structuredContent.message).toContain('truncated');
+  });
+
   it('skips label calls and omits _meta when the profile lacks the labels scope', async () => {
     process.env.PROFILE = 'standard';
     const calls = stubFetch([
@@ -707,5 +734,46 @@ describe('export_file handler', () => {
     const payload = JSON.parse(res.content[0].text);
     expect(payload).toMatchObject({ status: 403, reason: 'exportSizeLimitExceeded' });
     expect(payload.hint).toContain('10MB');
+  });
+});
+
+describe('list_recent_files order_by', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const listRecent = (args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).list_recent_files.handler(args));
+
+  it('orders by modifiedTime unless told otherwise', async () => {
+    const calls = stubFetch([['/files?', () => jsonResponse({ files: [] })]]);
+    await listRecent({});
+    expect(new URL(calls[0].url).searchParams.get('orderBy')).toBe('modifiedTime desc');
+  });
+
+  it('passes a recognised order_by through and ignores an unknown one', async () => {
+    const calls = stubFetch([['/files?', () => jsonResponse({ files: [] })]]);
+    await listRecent({ order_by: 'viewedByMeTime' });
+    await listRecent({ order_by: 'name' });
+    expect(new URL(calls[0].url).searchParams.get('orderBy')).toBe('viewedByMeTime desc');
+    expect(new URL(calls[1].url).searchParams.get('orderBy')).toBe('modifiedTime desc');
+  });
+});
+
+describe('share_file message', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const share = (args: any) =>
+    requestContext.run({ accessToken: 'tok' }, () =>
+      (GoogleDriveTools.getTools() as any).share_file.handler(args));
+
+  it('says a higher existing role was kept rather than claiming the lower one was granted', async () => {
+    stubFetch([['/permissions', () => jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'o@example.com' })]]);
+    const res = await share({ file_id: 'f1', type: 'user', role: 'reader', email: 'o@example.com' });
+    expect(res.structuredContent.role).toBe('owner');
+    expect(res.structuredContent.message).toContain('already has owner access');
+  });
+
+  it('reports the grant when the returned role matches', async () => {
+    stubFetch([['/permissions', () => jsonResponse({ id: 'p1', type: 'user', role: 'reader', emailAddress: 'r@example.com' })]]);
+    const res = await share({ file_id: 'f1', type: 'user', role: 'reader', email: 'r@example.com' });
+    expect(res.structuredContent.message).toBe('Shared with r@example.com as reader (no notification sent)');
   });
 });

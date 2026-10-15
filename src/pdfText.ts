@@ -82,10 +82,15 @@ export async function extractPdfText(bytes: Uint8Array, options: ExtractOptions 
       const page = await pdf.getPage(pageNum);
       try {
         const content = await page.getTextContent();
+        // Items carry an end-of-line flag; keeping those breaks preserves the
+        // paragraph layout. Fonts without a glyph map emit NUL for some
+        // characters, which is noise rather than text
         const pageText = content.items
-          .map((item: any) => (typeof item?.str === 'string' ? item.str : ''))
-          .join(' ')
-          .replace(/\s+/g, ' ')
+          .map((item: any) => (typeof item?.str === 'string' ? item.str + (item.hasEOL ? '\n' : ' ') : ''))
+          .join('')
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/ ?\n ?/g, '\n')
           .trim();
 
         if (pageText.length >= SCANNED_MAX_CHARS_PER_PAGE) textPages++;

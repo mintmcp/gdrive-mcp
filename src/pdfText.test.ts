@@ -14,6 +14,16 @@ describe('extractPdfText', () => {
     expect(r.textPages).toBe(1);
   });
 
+  it('keeps line breaks between lines instead of flattening the page', async () => {
+    const r = await extractPdfText(fixture('text-layer.pdf'));
+    expect(r.text.split('\n')).toEqual([
+      'CONFIDENTIAL QUARTERLY REPORT',
+      'Revenue was 4.2 million dollars this quarter.',
+      'The transition risk sits in the funding plumbing.',
+      'Seven risk factors ranked by severity.',
+    ]);
+  });
+
   it('marks a scanned PDF as having no text pages', async () => {
     const r = await extractPdfText(fixture('scanned.pdf'));
     expect(r.scanned).toBe(true);

@@ -5,58 +5,14 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
-import { extractPdfText, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
+import { MAX_TEXT_CHARS } from './pdfText.js';
+import { readFileContent } from './fileContent.js';
 import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
 import { resolveExportFormat, exportKind } from './exportFormats.js';
-import { log, errorFields } from "./log.js";
-
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 
 
-// MIME categorisation for get_file. We derive these from the *actual* metadata
-// mimeType, not from caller-supplied input, so the tool can't be lied into
-// returning garbled output.
-const TEXTUAL_APPLICATION_MIMES = new Set([
-  'application/json',
-  'application/xml',
-  'application/javascript',
-  'application/yaml',
-  'application/x-yaml',
-]);
-export function classifyMime(mimeType: string): 'text' | 'image' | 'pdf' | 'native-doc' | 'unsupported' {
-  if (!mimeType) return 'unsupported';
-  if (mimeType.startsWith('application/vnd.google-apps.')) return 'native-doc';
-  if (mimeType === 'application/pdf') return 'pdf';
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('text/')) return 'text';
-  if (TEXTUAL_APPLICATION_MIMES.has(mimeType)) return 'text';
-  return 'unsupported';
-}
-
-const GOOGLE_NATIVE_SERVERS: Record<string, string> = {
-  'application/vnd.google-apps.document': 'Google Docs',
-  'application/vnd.google-apps.spreadsheet': 'Google Sheets',
-  'application/vnd.google-apps.presentation': 'Google Slides',
-};
-
-// Readable elsewhere, so route rather than give the generic wrong-type message.
-const OFFICE_ROUTES: Record<string, string> = {
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-    'This is an Excel spreadsheet — use the Google Sheets MCP server to read it.',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-    'This is a Word document — use the Google Docs MCP server to read it.',
-  'application/vnd.ms-excel':
-    'This is a legacy Excel (.xls) file, which cannot be read directly. Open it and use File → Save as Google Sheets first.',
-  'application/msword':
-    'This is a legacy Word (.doc) file — use the Google Docs MCP server to read it.',
-};
-
-const GOOGLE_NATIVE_EXPORT_ONLY: Record<string, string> = {
-  'application/vnd.google-apps.drawing': 'a Google Drawing',
-  'application/vnd.google-apps.script': 'an Apps Script project',
-};
-
+// upload_file points callers at the right tool for a Google-native type
 const GOOGLE_NATIVE_CREATORS: Record<string, string> = {
   'application/vnd.google-apps.document':
     'To author a Google Doc, use create_document on the Google Docs MCP server.',
@@ -66,29 +22,6 @@ const GOOGLE_NATIVE_CREATORS: Record<string, string> = {
     'To author a Google Slides deck, use create_presentation on the Google Slides MCP server.',
   'application/vnd.google-apps.folder': 'To make a folder, use create_folder.',
 };
-
-/**
- * Message for a file get_file cannot read. Office and Google-native files are
- * readable by a sibling connector, so they get a pointer to the right server
- * instead of the generic "wrong file type" advice.
- */
-export function unsupportedMessage(name: string, mimeType: string, webViewLink: string): string {
-  const office = OFFICE_ROUTES[mimeType];
-  if (office) return `'${name}': ${office} Open it directly: ${webViewLink}`;
-
-  const service = GOOGLE_NATIVE_SERVERS[mimeType];
-  if (service) {
-    return `'${name}' is a ${service} file, which get_file cannot read. Use the ${service} MCP server to read its contents, export_file to export it (for example as Markdown or PDF), or open it directly: ${webViewLink}`;
-  }
-  const exportable = GOOGLE_NATIVE_EXPORT_ONLY[mimeType];
-  if (exportable) {
-    return `'${name}' is ${exportable}, which get_file cannot read. Use export_file to export it, or open it directly: ${webViewLink}`;
-  }
-  if (mimeType.startsWith('application/vnd.google-apps.')) {
-    return `'${name}' is a Google Drive-native file ('${mimeType}') with no downloadable contents. Open it directly: ${webViewLink}`;
-  }
-  return `File '${name}' has unsupported mimeType '${mimeType}'. This tool supports text, image and PDF files. Open it directly: ${webViewLink}`;
-}
 
 /**
  * Escape a string for safe interpolation inside Google Drive `q` single-quoted
@@ -377,6 +310,8 @@ export function buildFileUpdate(args: {
 }
 
 
+const RECENT_ORDERS = ['modifiedTime', 'modifiedByMeTime', 'viewedByMeTime', 'createdTime'] as const;
+
 // Bound get_file_permissions pagination by page COUNT, not just token presence,
 // so a buggy/repeating nextPageToken from Drive can't spin forever.
 const MAX_PERMISSION_PAGES = 10;
@@ -460,7 +395,8 @@ export class GoogleDriveTools {
 - 'FOLDER_ID' in parents and trashed = false
 - starred = true and trashed = false
 - sharedWithMe and trashed = false
-Operators: name, mimeType, modifiedTime, createdTime, owners, writers, readers, starred, trashed, sharedWithMe, parents.
+- fullText contains 'quarterly forecast' and trashed = false (matches title, description and body text)
+Operators: name, fullText, mimeType, modifiedTime, createdTime, owners, writers, readers, starred, trashed, sharedWithMe, parents.
 Comparisons: contains, =, !=, <, >, <=, >=. Combine with: and, or, not.
 String literals use single quotes; escape internal apostrophes as \\' (e.g. name contains 'O\\\\'Brien'). Always include "trashed = false" unless searching trash.`),
           mime_type: z
@@ -843,7 +779,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       get_file: {
-        description: 'Fetch the contents of a Google Drive file (text, image, or PDF up to 20MB). Use this after search_files when the user wants the file body, not just metadata. PDFs with a text layer are returned as readable text in `content`. Scanned/image-only PDFs have no text to extract: the result says so and carries `scanned: true` plus a `webViewLink` to open the file, rather than returning unreadable bytes. `extraction` tells you which branch produced the result. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use export_file or the dedicated MCP servers for those. Files over 20MB, unsupported mime types and Google-native docs are reported as tool errors, not results.',
+        description: 'Fetch the contents of a Google Drive file up to 20MB: text files, images, PDFs, and Office documents (.docx, .xlsx, .pptx, .odt, .ods, .odp) as text. Use this after search_files when the user wants the file body, not just metadata. PDFs with a text layer and Office documents are returned as readable text in `content`; spreadsheets come back as CSV, one block per sheet, with raw cell values (dates appear as serial numbers). Headers, footers and comments are not included. Text longer than 200,000 characters is cut off and flagged with `truncated`. Scanned/image-only PDFs have no text to extract: the result says so and carries `scanned: true` plus a `webViewLink` to open the file, rather than returning unreadable bytes. `extraction` tells you which branch produced the result. Does NOT support Google-native docs (Docs/Sheets/Slides/Forms) — use export_file or the dedicated MCP servers for those. Files over 20MB, unsupported mime types and Google-native docs are reported as tool errors, not results.',
         readOnlyHint: true,
         outputSchema: {
           id: z.string().optional(),
@@ -853,7 +789,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           webViewLink: z.string().optional(),
           // Which branch produced this result; everything below varies with it.
           extraction: z.enum(['text', 'image', 'scanned', 'failed']).optional(),
-          content: z.string().optional().describe('File text, for text files and PDFs with a text layer'),
+          content: z.string().optional().describe('File text, for text files, Office documents and PDFs with a text layer'),
           pages: z.number().optional().describe('PDF page count'),
           textPages: z.number().optional().describe('PDF pages carrying a text layer'),
           scanned: z.boolean().optional().describe('True when a PDF is image-only'),
@@ -868,141 +804,9 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
           const labelsMeta = fetchLabelsMeta(file_id, accessToken);
 
-          const run = async () => {
-            const meta = await makeDriveRequest(
-              `/files/${encodeURIComponent(file_id)}?fields=id,name,mimeType,size,webViewLink&supportsAllDrives=true`,
-              accessToken
-            );
-
-            const mimeType: string = meta.mimeType || '';
-            const size = meta.size ? parseInt(meta.size) : 0;
-            const name: string = meta.name || '';
-            const kind = classifyMime(mimeType);
-            const webViewLink: string =
-              meta.webViewLink || `https://drive.google.com/file/d/${meta.id}/view`;
-
-            if (kind === 'native-doc' || kind === 'unsupported') {
-              return formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink)));
-            }
-
-            if (size > MAX_FILE_SIZE) {
-              return formatDriveError(new Error(
-                `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
-                `Open in browser instead: ${webViewLink}.`
-              ));
-            }
-
-            const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
-            const response = await fetch(downloadUrl, {
-              headers: { 'Authorization': `Bearer ${accessToken}` },
-            });
-
-            if (!response.ok) {
-              const bodyText = await response.text().catch(() => '');
-              throw new DriveApiError(
-                `Failed to download file content${bodyText ? `: ${bodyText}` : ''} (${response.status})`,
-                response.status,
-              );
-            }
-
-            const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
-            const jsonBlock = (payload: unknown) => ({
-              type: 'text' as const,
-              text: JSON.stringify(payload, null, 2),
-            });
-
-            if (kind === 'pdf') {
-              const arrayBuffer = await response.arrayBuffer();
-              // read before extraction: the PDF parser can detach the buffer
-              const bytes = arrayBuffer.byteLength;
-              let pdfText: PdfText | undefined;
-              let failure: string | undefined;
-              const startedAt = Date.now();
-              try {
-                pdfText = await extractPdfText(new Uint8Array(arrayBuffer));
-              } catch (err: any) {
-                failure = err?.message || 'the PDF could not be parsed';
-                log("error", "pdf_extraction_failed", {
-                  ...errorFields(err),
-                  bytes,
-                  elapsedMs: Date.now() - startedAt,
-                });
-              }
-
-              let result: Record<string, unknown>;
-              if (!pdfText) {
-                result = {
-                  ...fileMeta,
-                  extraction: 'failed',
-                  message: `Could not extract text from '${name}' because ${failure}. Open the file directly instead: ${webViewLink}`,
-                };
-              } else if (pdfText.scanned) {
-                result = {
-                  ...fileMeta,
-                  extraction: 'scanned',
-                  pages: pdfText.pages,
-                  textPages: pdfText.textPages,
-                  scanned: true,
-                  message:
-                    `'${name}' is a scanned (image-only) PDF with ${pdfText.pages} page(s) and no text layer, ` +
-                    `so there is no text to extract. Reading its contents would require rendering each page as ` +
-                    `an image, which consumes a large number of tokens and is not supported by this connector. ` +
-                    `Open the file directly instead: ${webViewLink}`,
-                };
-              } else {
-                const notes: string[] = [];
-                if (pdfText.textPages < pdfText.pages) {
-                  notes.push(
-                    `only ${pdfText.textPages} of ${pdfText.pages} page(s) carry a text layer; ` +
-                    `the rest appear to be scanned images and are not included`
-                  );
-                }
-                if (pdfText.truncated) {
-                  notes.push(`the text was truncated at ${MAX_TEXT_CHARS} characters`);
-                }
-                result = {
-                  ...fileMeta,
-                  extraction: 'text',
-                  content: pdfText.text,
-                  pages: pdfText.pages,
-                  textPages: pdfText.textPages,
-                  ...(pdfText.truncated ? { truncated: true } : {}),
-                  ...(notes.length
-                    ? { message: `Note: ${notes.join('; ')}. Full file: ${webViewLink}` }
-                    : {}),
-                };
-              }
-
-              return { content: [jsonBlock(result)], structuredContent: result };
-            }
-
-            if (kind === 'image') {
-              const arrayBuffer = await response.arrayBuffer();
-              // Node ≥22 is declared in package.json; Buffer is safe and avoids
-              // the O(n²) String.fromCharCode chunking required by btoa.
-              const base64Data = Buffer.from(arrayBuffer).toString('base64');
-              const imageMeta = { ...fileMeta, extraction: 'image' as const };
-              return {
-                content: [
-                  jsonBlock(imageMeta),
-                  { type: 'image' as const, data: base64Data, mimeType },
-                ],
-                structuredContent: imageMeta,
-              };
-            }
-
-            // kind === 'text'
-            const textContent = await response.text();
-            const result = { ...fileMeta, extraction: 'text' as const, content: textContent };
-            return {
-              content: [jsonBlock(result)],
-              structuredContent: result,
-            };
-          };
-
           let result: Record<string, unknown>;
           try {
-            result = await run();
+            result = await readFileContent(file_id, accessToken);
           } catch (err) {
             result = formatDriveError(err);
           }
@@ -1270,7 +1074,9 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               ? `Anyone with the link can ${verb} this file`
               : type === 'domain'
                 ? `Anyone in ${normalisedDomain} can ${verb} this file`
-                : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`;
+                : result.role && result.role !== role
+                  ? `${email} already has ${result.role} access, which Drive kept instead of lowering it to ${role}`
+                  : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`;
 
             const output = {
               permissionId: result.id,
@@ -1434,7 +1240,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       list_recent_files: {
-        description: 'List the most recently modified files in Google Drive, newest first. Use this when the user asks for their recent/latest files without a specific search term. Excludes trashed items and folders; spans My Drive and every accessible shared drive. Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages. For a targeted search use search_files instead.',
+        description: 'List recent files in Google Drive, newest first: by default those most recently modified by anyone, or with order_by those most recently modified by the user, opened by the user, or created. Use this when the user asks for their recent/latest files without a specific search term. Excludes trashed items and folders; spans My Drive and every accessible shared drive. Returns up to page_size items (default 20, max 100) plus a nextPageToken for further pages. For a targeted search use search_files instead.',
         readOnlyHint: true,
         outputSchema: {
           files: z.array(driveFileSchema),
@@ -1450,16 +1256,21 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             .optional()
             .describe('Number of results per page (1-100, default 20).'),
           page_token: z.string().optional().describe('Token from a previous nextPageToken to fetch the next page.'),
+          order_by: z
+            .enum(RECENT_ORDERS)
+            .optional()
+            .describe('Which timestamp "recent" means: modifiedTime (default, modified by anyone), modifiedByMeTime, viewedByMeTime (last opened by the user), or createdTime. A page_token only works with the order_by it was issued for.'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ page_size, page_token }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.readonly", async ({ page_size, page_token, order_by }: any, context: any) => {
           const { accessToken } = context;
 
           try {
             const effectivePageSize = Math.min(Math.max(Number(page_size) || 20, 1), 100);
+            const orderBy = RECENT_ORDERS.includes(order_by) ? order_by : 'modifiedTime';
 
             const params = new URLSearchParams({
               pageSize: String(effectivePageSize),
-              orderBy: 'modifiedTime desc',
+              orderBy: `${orderBy} desc`,
               q: "trashed = false and mimeType != 'application/vnd.google-apps.folder'",
               fields: DRIVE_FILE_LIST_FIELDS,
               corpora: 'allDrives',

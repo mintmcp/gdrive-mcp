@@ -31,8 +31,8 @@ Required Google OAuth scopes (configured on the MintMCP connector):
 | Category        | Tool                   | Notes                                                      |
 |-----------------|------------------------|------------------------------------------------------------|
 | Search / find   | `search_files`         | Drive `q` syntax + optional `mime_type` and `drive_id`.    |
-|                 | `list_recent_files`    | Most recently modified files, newest first; excludes folders/trash. |
-| Read / get      | `get_file`             | Up to 20MB; text / image / pdf. Rejects Google-native docs.|
+|                 | `list_recent_files`    | Recent files, newest first, by modified / modified-by-me / viewed-by-me / created time; excludes folders/trash. |
+| Read / get      | `get_file`             | Up to 20MB; text / image / pdf / Office (docx, xlsx, pptx, odt, ods, odp) as text. Rejects Google-native docs.|
 |                 | `export_file`          | Google-native docs to md, pdf, docx, xlsx, csv, pptx, png… |
 |                 | `get_file_metadata`    | Full metadata for any file/folder; no download.            |
 |                 | `get_file_permissions` | Lists who has access and at what role.                     |
