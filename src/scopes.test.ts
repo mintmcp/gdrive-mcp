@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { FEATURES, PROFILES, SCOPES, expandScopes, grantedScopes, isToolGranted, resolveGrant, type Grant } from "./scopes.js";
+import { FEATURES, PROFILES, SCOPES, expandScopes, isToolGranted, resolveGrant, type Grant } from "./scopes.js";
 import { createServer } from "./server.js";
 
 describe("expandScopes", () => {
@@ -20,28 +20,28 @@ describe("expandScopes", () => {
   });
 });
 
-describe("grantedScopes", () => {
+describe("resolveGrant scopes", () => {
   test("unset means unrestricted", () => {
-    expect(grantedScopes(undefined)).toBeNull();
+    expect(resolveGrant(undefined)).toBeNull();
   });
 
   test("resolves a profile to its scope set", () => {
-    const granted = grantedScopes("standard");
+    const granted = resolveGrant("standard")?.scopes;
     expect(granted).toEqual(new Set([SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE]));
   });
 
   test("expands implied scopes, so full covers the narrow grants", () => {
-    const granted = grantedScopes("full");
+    const granted = resolveGrant("full")?.scopes;
     expect(granted?.has(SCOPES.DRIVE_FILE)).toBe(true);
     expect(granted?.has(SCOPES.DRIVE_READONLY)).toBe(true);
   });
 
   test("an unknown profile fails at boot, not silently serving every tool", () => {
-    expect(() => grantedScopes("readonly")).toThrow(/unknown profile/i);
+    expect(() => resolveGrant("readonly")).toThrow(/unknown profile/i);
   });
 
   test("set but empty is a misconfiguration, not a silent lockout", () => {
-    expect(() => grantedScopes("   ")).toThrow(/unset it/i);
+    expect(() => resolveGrant("   ")).toThrow(/unset it/i);
   });
 });
 
@@ -55,7 +55,7 @@ describe("resolveGrant", () => {
   });
 
   test("standard-resources has the scopes of standard plus the resources feature", () => {
-    expect(resolveGrant("standard-resources")?.scopes).toEqual(grantedScopes("standard"));
+    expect(resolveGrant("standard-resources")?.scopes).toEqual(resolveGrant("standard")?.scopes);
     expect(resolveGrant("standard-resources")?.features).toEqual(new Set([FEATURES.RESOURCES]));
   });
 

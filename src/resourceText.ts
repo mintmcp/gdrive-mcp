@@ -3,9 +3,9 @@
 
 import { MAX_TEXT_CHARS } from './limits.js';
 
-// What one resources/read branch produces: the text (Markdown unless a
-// mimeType says otherwise), or the reason for a D9 details-only text instead
-export type TextRead = { text: string; mimeType?: string } | { detailsOnly: string };
+// What one resources/read reader produces: the text, or the reason for a D9
+// details-only text instead
+export type TextRead = { text: string } | { detailsOnly: string };
 
 // A fence longer than any backtick run in the text, so the text can't close it
 export function codeFence(text: string): string {

@@ -4,6 +4,7 @@
 // export (D19)
 
 import { DriveApiError, EXPORT_LIMIT_MESSAGE, ResponseTooLargeError, driveRequestInit, exportFile, makeDriveRequest } from './driveApi.js';
+import type { DriveUri } from './driveUri.js';
 import { codeFence, sliceChars, stripBom, type TextRead } from './resourceText.js';
 import { log } from './log.js';
 import {
@@ -52,9 +53,8 @@ export interface ReadPlan {
 }
 
 export interface SheetsContext {
-  fileId: string;
+  file: DriveUri;
   accessToken: string;
-  resourceKey?: string;
   signal: AbortSignal;
   name: string;
   link: string;
@@ -231,14 +231,14 @@ export function isKeyedFallbackError(err: unknown): boolean {
 }
 
 function requestInit(ctx: SheetsContext): RequestInit {
-  return driveRequestInit({ id: ctx.fileId, resourceKey: ctx.resourceKey }, ctx.signal);
+  return driveRequestInit(ctx.file, ctx.signal);
 }
 
 export async function readSheet(ctx: SheetsContext): Promise<TextRead> {
   try {
     return await readThroughSheetsApi(ctx);
   } catch (err) {
-    if (!ctx.resourceKey || !isKeyedFallbackError(err)) throw err;
+    if (!ctx.file.resourceKey || !isKeyedFallbackError(err)) throw err;
     log('info', 'sheets_keyed_fallback', { status: (err as DriveApiError).status });
     return readFirstTabExport(ctx);
   }
@@ -259,7 +259,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
 
   let meta: any;
   try {
-    meta = await fetchJson(`${SHEETS_API}/${encodeURIComponent(ctx.fileId)}?fields=${encodeURIComponent(TAB_FIELDS)}`);
+    meta = await fetchJson(`${SHEETS_API}/${encodeURIComponent(ctx.file.id)}?fields=${encodeURIComponent(TAB_FIELDS)}`);
   } catch (err) {
     if (err instanceof ResponseTooLargeError) return { detailsOnly: sizeLimitReason() };
     throw err;
@@ -278,7 +278,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
     };
   });
 
-  const plan = planRead(tabs, ctx.fileId);
+  const plan = planRead(tabs, ctx.file.id);
   const ledger = new CellLedger(plan.grid);
   const leaveOut = (requests: TabRequest[], leftOut: LeftOut) => {
     for (const r of requests) ledger.settle(r.tab, { leftOut });
@@ -287,7 +287,7 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
 
   const fetchValues = async (requests: TabRequest[]) => {
     calls++;
-    const data = await fetchJson(batchGetUrl(ctx.fileId, requests.map((r) => r.range)));
+    const data = await fetchJson(batchGetUrl(ctx.file.id, requests.map((r) => r.range)));
     const valueRanges: any[] = Array.isArray(data?.valueRanges) ? data.valueRanges : [];
     requests.forEach((request, j) => {
       const values: unknown[] = Array.isArray(valueRanges[j]?.values) ? valueRanges[j].values : [];
@@ -482,7 +482,7 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
 // D19: Drive's CSV export of the first tab, for a keyed link the Sheets API
 // refused
 async function readFirstTabExport(ctx: SheetsContext): Promise<TextRead> {
-  const bytes = await exportFile(ctx.fileId, 'text/csv', ctx.accessToken, requestInit(ctx));
+  const bytes = await exportFile(ctx.file.id, 'text/csv', ctx.accessToken, requestInit(ctx));
   if (!bytes) return { detailsOnly: EXPORT_LIMIT_MESSAGE };
 
   const csv = stripBom(bytes.toString('utf8')).replace(/\r\n/g, '\n').replace(/\n$/, '');

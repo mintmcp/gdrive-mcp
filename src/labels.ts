@@ -1,5 +1,6 @@
 import { driveRequestInit, makeDriveRequest } from './driveApi.js';
-import { grantedScopes, SCOPES } from './scopes.js';
+import { isToolGranted, SCOPES } from './scopes.js';
+import { getGrant } from './auth.js';
 import { log, errorFields } from "./log.js";
 
 const DRIVE_LABELS_API = 'https://drivelabels.googleapis.com/v2';
@@ -30,8 +31,8 @@ export type AppliedLabel = {
 // files.listLabels page, and the read's deadline signal on every label call.
 // Omitted, the calls are exactly what get_file and get_file_metadata make
 export type LabelReadOptions = {
-  resourceKey?: string;
-  signal?: AbortSignal;
+  resourceKey?: string | undefined;
+  signal?: AbortSignal | undefined;
 };
 
 export type FileLabels = {
@@ -214,8 +215,7 @@ export function fetchLabelsMeta(
   accessToken: string,
   options: LabelReadOptions = {}
 ): Promise<Record<string, unknown>> | null {
-  const granted = grantedScopes();
-  if (granted !== null && !granted.has(SCOPES.DRIVE_LABELS_READONLY)) return null;
+  if (!isToolGranted(SCOPES.DRIVE_LABELS_READONLY, getGrant())) return null;
   return getFileLabels(fileId, accessToken, options).then(({ applied, error }) => ({
     applied,
     ...(error ? { labelsError: error } : {}),

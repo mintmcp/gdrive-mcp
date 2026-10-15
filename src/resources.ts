@@ -28,7 +28,8 @@ import {
 import { parseDriveUri, type DriveUri } from './driveUri.js';
 import { fetchLabelsMeta } from './labels.js';
 import { errorFields, log, truncate } from './log.js';
-import { EXTRACT_TIMEOUT_MS, extractPdfText, type PdfText } from './pdfText.js';
+import { EXTRACT_TIMEOUT_MS } from './pdfText.js';
+import { readPdf } from './pdfRead.js';
 import { TEXTUAL_APPLICATION_MIMES, classifyMime } from './mime.js';
 import { capText, detailsOnlyText, sliceChars, stripBom, typeName, type TextRead } from './resourceText.js';
 import { readSheet } from './sheets.js';
@@ -71,17 +72,16 @@ class DeadlineError extends Error {
  * passes, and the call settles at that moment with the timeout, whatever the
  * work is doing (a stalled request, a long PDF extraction). A late result is
  * discarded, also when synchronous work kept the timer from firing on time.
- * Work passed to `track` keeps the deadline after the call settles: it may
- * finish on its own, but is aborted if it outlives the deadline
+ * Whatever the work still has in flight when the call settles (a label lookup
+ * after a content error) is aborted with it
  */
 async function withDeadline<T>(
   ms: number,
   message: string,
-  work: (signal: AbortSignal, deadlineAt: number, track: (pending: Promise<unknown>) => void) => Promise<T>,
+  work: (signal: AbortSignal, deadlineAt: number) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
   const deadlineAt = Date.now() + ms;
-  const tracked: Promise<unknown>[] = [];
   const expire = () => {
     if (!controller.signal.aborted) controller.abort(new DeadlineError(message));
     return controller.signal.reason;
@@ -91,7 +91,7 @@ async function withDeadline<T>(
     timer = setTimeout(() => reject(expire()), ms);
   });
   try {
-    const result = await Promise.race([work(controller.signal, deadlineAt, (p) => tracked.push(p)), expired]);
+    const result = await Promise.race([work(controller.signal, deadlineAt), expired]);
     if (Date.now() >= deadlineAt) throw expire();
     return result;
   } catch (err) {
@@ -99,8 +99,8 @@ async function withDeadline<T>(
     if (controller.signal.aborted || Date.now() >= deadlineAt) throw expire();
     throw err;
   } finally {
-    if (tracked.length) void Promise.allSettled(tracked).then(() => clearTimeout(timer));
-    else clearTimeout(timer);
+    clearTimeout(timer);
+    if (!controller.signal.aborted) controller.abort(new Error('The read ended'));
   }
 }
 
@@ -143,17 +143,13 @@ async function logFailures<T>(event: string, run: () => Promise<T>): Promise<T> 
 
 // What resources/read returns for a Drive type, or null for types not listed
 export function resourceMimeType(driveMimeType: string): string | null {
-  if (driveMimeType === FOLDER || driveMimeType === DOC || driveMimeType === SHEET) return 'text/markdown';
-  if (driveMimeType === SLIDES || driveMimeType === PDF) return 'text/plain';
-  if (driveMimeType && classifyMime(driveMimeType) === 'text') return driveMimeType;
-  return null;
+  return readerFor(driveMimeType)?.mimeType ?? null;
 }
 
-// D6: folders, Docs, Sheets, Slides, PDFs and text files (classifyMime's text
-// tables), not trashed
+// D6: the readable types (READERS and classifyMime's text tables), not trashed
 export function resourceListQuery(): string {
   const types = [
-    ...[FOLDER, DOC, SHEET, SLIDES, PDF].map((m) => `mimeType = '${m}'`),
+    ...Object.keys(READERS).map((m) => `mimeType = '${m}'`),
     `mimeType contains 'text/'`,
     ...[...TEXTUAL_APPLICATION_MIMES].map((m) => `mimeType = '${m}'`),
   ];
@@ -254,17 +250,11 @@ export async function readResource(uri: string): Promise<ReadResourceResult> {
   return withDeadline(
     RESOURCE_READ_DEADLINE_MS,
     `Reading this file timed out after ${RESOURCE_READ_DEADLINE_MS / 1000} s`,
-    async (signal, deadlineAt, track) => {
-      // D11: labels exactly as get_file attaches them, in parallel with the read.
-      // On a content error they finish on their own, still under the deadline
-      const labels = fetchLabelsMeta(file.id, accessToken, {
-        ...(file.resourceKey ? { resourceKey: file.resourceKey } : {}),
-        signal,
-      });
-      if (labels) track(labels);
+    async (signal, deadlineAt) => {
+      // D11: labels exactly as get_file attaches them, in parallel with the read
       const [content, labelsMeta] = await Promise.all([
         readContent(uri, file, accessToken, signal, deadlineAt),
-        labels,
+        fetchLabelsMeta(file.id, accessToken, { resourceKey: file.resourceKey, signal }),
       ]);
       return {
         contents: [content],
@@ -274,8 +264,6 @@ export async function readResource(uri: string): Promise<ReadResourceResult> {
   );
 }
 
-const OVER_FILE_LIMIT = `The file is over the ${MAX_FILE_SIZE / (1024 * 1024)} MB limit for reading.`;
-
 async function readContent(
   uri: string,
   file: DriveUri,
@@ -283,19 +271,26 @@ async function readContent(
   signal: AbortSignal,
   deadlineAt: number,
 ): Promise<Content> {
-  const init = driveRequestInit(file, signal);
   const meta = await makeDriveRequest(
     `/files/${encodeURIComponent(file.id)}?fields=id,name,mimeType,size,webViewLink,exportLinks&supportsAllDrives=true`,
     accessToken,
-    init,
+    driveRequestInit(file, signal),
   );
   const name: string = meta?.name || 'Untitled';
   const mimeType: string = meta?.mimeType || '';
   const link: string = meta?.webViewLink || uri;
   const size = parseDriveSize(meta?.size);
 
-  const read = await readByType({ file, accessToken, init, signal, deadlineAt, name, mimeType, link, size });
-  if ('text' in read) return { uri, mimeType: read.mimeType ?? 'text/markdown', text: read.text };
+  const reader = readerFor(mimeType);
+  if (!reader) {
+    throw new ResourceError(
+      RESOURCE_NOT_FOUND,
+      `'${sliceChars(name, 200)}' (${typeName(mimeType)}) can't be added as text. Open it directly: ${link}`,
+      'unsupported_type',
+    );
+  }
+  const read = await reader.read({ file, accessToken, signal, deadlineAt, name, mimeType, link, size });
+  if ('text' in read) return { uri, mimeType: reader.mimeType, text: read.text };
   return {
     uri,
     mimeType: 'text/markdown',
@@ -306,7 +301,6 @@ async function readContent(
 type FileRead = {
   file: DriveUri;
   accessToken: string;
-  init: RequestInit;
   signal: AbortSignal;
   deadlineAt: number;
   name: string;
@@ -315,72 +309,54 @@ type FileRead = {
   size: number | undefined;
 };
 
-async function readByType(r: FileRead): Promise<TextRead> {
-  const exported = async (exportMimeType: string): Promise<string | null> => {
-    const bytes = await exportFile(r.file.id, exportMimeType, r.accessToken, r.init);
-    return bytes && stripBom(bytes.toString('utf8'));
-  };
+type Reader = { mimeType: string; read: (r: FileRead) => Promise<TextRead> };
 
-  // Bytes of a file stored as-is, or null when it's over MAX_FILE_SIZE
-  const download = async (): Promise<Buffer | null> => {
-    if (r.size !== undefined && r.size > MAX_FILE_SIZE) return null;
-    try {
-      return await makeDriveRequest(
-        `/files/${encodeURIComponent(r.file.id)}?alt=media&supportsAllDrives=true`,
-        r.accessToken,
-        r.init,
-        { responseType: 'bytes', maxBytes: MAX_FILE_SIZE },
-      );
-    } catch (err) {
-      if (err instanceof ResponseTooLargeError) return null;
-      throw err;
-    }
-  };
+// The Drive types a resource can be, what resources/read returns each as, and
+// how. Text files are the one family outside the table (readerFor)
+const READERS: Record<string, Reader> = {
+  [FOLDER]: { mimeType: 'text/markdown', read: readFolder },
+  [DOC]: { mimeType: 'text/markdown', read: (r) => readExport(r, 'text/markdown') },
+  [SHEET]: { mimeType: 'text/markdown', read: (r) => readSheet(r) },
+  [SLIDES]: { mimeType: 'text/plain', read: (r) => readExport(r, 'text/plain') },
+  [PDF]: { mimeType: 'text/plain', read: readPdfFile },
+};
 
-  if (r.mimeType === DOC) {
-    const body = await exported('text/markdown');
-    return body === null ? { detailsOnly: EXPORT_LIMIT_MESSAGE } : { text: capText(body, r.link) };
+function readerFor(driveMimeType: string): Reader | null {
+  if (READERS[driveMimeType]) return READERS[driveMimeType];
+  if (driveMimeType && classifyMime(driveMimeType) === 'text') return { mimeType: driveMimeType, read: readTextFile };
+  return null;
+}
+
+const init = (r: FileRead): RequestInit => driveRequestInit(r.file, r.signal);
+
+async function readExport(r: FileRead, exportMimeType: string): Promise<TextRead> {
+  const bytes = await exportFile(r.file.id, exportMimeType, r.accessToken, init(r));
+  if (!bytes) return { detailsOnly: EXPORT_LIMIT_MESSAGE };
+  return { text: capText(stripBom(bytes.toString('utf8')), r.link) };
+}
+
+const OVER_FILE_LIMIT = `The file is over the ${MAX_FILE_SIZE / (1024 * 1024)} MB limit for reading.`;
+
+// Bytes of a file stored as-is, or null when it's over MAX_FILE_SIZE
+async function download(r: FileRead): Promise<Buffer | null> {
+  if (r.size !== undefined && r.size > MAX_FILE_SIZE) return null;
+  try {
+    return await makeDriveRequest(
+      `/files/${encodeURIComponent(r.file.id)}?alt=media&supportsAllDrives=true`,
+      r.accessToken,
+      init(r),
+      { responseType: 'bytes', maxBytes: MAX_FILE_SIZE },
+    );
+  } catch (err) {
+    if (err instanceof ResponseTooLargeError) return null;
+    throw err;
   }
+}
 
-  if (r.mimeType === SLIDES) {
-    const body = await exported('text/plain');
-    return body === null ? { detailsOnly: EXPORT_LIMIT_MESSAGE } : { text: capText(body, r.link), mimeType: 'text/plain' };
-  }
-
-  if (r.mimeType === SHEET) {
-    return readSheet({
-      fileId: r.file.id,
-      accessToken: r.accessToken,
-      ...(r.file.resourceKey ? { resourceKey: r.file.resourceKey } : {}),
-      signal: r.signal,
-      name: r.name,
-      link: r.link,
-    });
-  }
-
-  if (r.mimeType === FOLDER) {
-    return { text: await folderListing(r.file, r.accessToken, r.init, r.name, r.link) };
-  }
-
-  const kind = classifyMime(r.mimeType);
-
-  if (kind === 'pdf') {
-    const bytes = await download();
-    if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
-    return readPdf(bytes, r.signal, r.deadlineAt, r.link);
-  }
-
-  if (kind === 'text') {
-    const bytes = await download();
-    if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
-    return { text: capText(stripBom(bytes.toString('utf8')), r.link), mimeType: r.mimeType };
-  }
-
-  throw new ResourceError(
-    RESOURCE_NOT_FOUND,
-    `'${sliceChars(r.name, 200)}' (${typeName(r.mimeType)}) can't be added as text. Open it directly: ${r.link}`,
-    'unsupported_type',
-  );
+async function readTextFile(r: FileRead): Promise<TextRead> {
+  const bytes = await download(r);
+  if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
+  return { text: capText(stripBom(bytes.toString('utf8')), r.link) };
 }
 
 /**
@@ -389,48 +365,33 @@ async function readByType(r: FileRead): Promise<TextRead> {
  * abandoned extraction runs on until the extractor's own timeout stops it, and
  * its result is discarded
  */
-async function readPdf(bytes: Buffer, signal: AbortSignal, deadlineAt: number, link: string): Promise<TextRead> {
-  const timeoutMs = Math.max(0, Math.min(EXTRACT_TIMEOUT_MS, deadlineAt - Date.now()));
-  const byteLength = bytes.byteLength;
-  let pdf: PdfText | undefined;
-  let failure: string | undefined;
-  const startedAt = Date.now();
-  try {
-    // The parser can detach the buffer it gets: hand it a view only when the
-    // Buffer owns its whole ArrayBuffer (never a slice of Node's shared pool)
-    const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
-    const data = owned ? new Uint8Array(bytes.buffer, 0, bytes.byteLength) : new Uint8Array(bytes);
-    pdf = await extractPdfText(data, { timeoutMs });
-  } catch (err: any) {
-    // Precedence: past the deadline, the outcome is the timeout (withDeadline
-    // turns this throw into it, even before its timer has fired)
-    signal.throwIfAborted();
-    if (Date.now() >= deadlineAt) throw err;
-    failure = err?.message || 'the PDF could not be parsed';
-    log('error', 'pdf_extraction_failed', {
-      ...errorFields(err),
-      bytes: byteLength,
-      elapsedMs: Date.now() - startedAt,
-    });
-  }
-  signal.throwIfAborted();
+async function readPdfFile(r: FileRead): Promise<TextRead> {
+  const bytes = await download(r);
+  if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
+  const timeoutMs = Math.max(0, Math.min(EXTRACT_TIMEOUT_MS, r.deadlineAt - Date.now()));
+  const pdf = await readPdf(bytes, { timeoutMs, signal: r.signal, deadlineAt: r.deadlineAt });
+  r.signal.throwIfAborted();
 
-  if (!pdf) {
-    return { detailsOnly: `Text couldn't be extracted from this PDF because ${truncate(failure ?? '', 200)}.` };
+  if (pdf.outcome === 'failed') {
+    return { detailsOnly: `Text couldn't be extracted from this PDF because ${truncate(pdf.reason, 200)}.` };
   }
-  if (pdf.scanned) {
+  if (pdf.outcome === 'scanned') {
     return {
       detailsOnly: `It's a scanned (image-only) PDF with ${pdf.pages} page(s) and no text layer, so there is no text to extract.`,
     };
   }
   const notes: string[] = [];
-  if (pdf.textPages < pdf.pages) {
+  if (pdf.pdf.textPages < pdf.pdf.pages) {
     notes.push(
-      `Note: only ${pdf.textPages} of ${pdf.pages} page(s) carry a text layer; the rest appear to be scanned ` +
-      `images and are not included. Full file: ${link}`,
+      `Note: only ${pdf.pdf.textPages} of ${pdf.pdf.pages} page(s) carry a text layer; the rest appear to be scanned ` +
+      `images and are not included. Full file: ${r.link}`,
     );
   }
-  return { text: capText(pdf.text, link, { notes, truncated: pdf.truncated }), mimeType: 'text/plain' };
+  return { text: capText(pdf.pdf.text, r.link, { notes, truncated: pdf.pdf.truncated }) };
+}
+
+async function readFolder(r: FileRead): Promise<TextRead> {
+  return { text: await folderListing(r.file, r.accessToken, init(r), r.name, r.link) };
 }
 
 function escapeLinkText(name: string): string {

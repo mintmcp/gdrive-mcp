@@ -5,13 +5,12 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
-import { extractPdfText, type PdfText } from './pdfText.js';
+import { readPdf } from './pdfRead.js';
 import { classifyMime } from './mime.js';
 import { MAX_FILE_SIZE, MAX_TEXT_CHARS } from './limits.js';
-import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
+import { DriveApiError, ResponseTooLargeError, formatDriveError, makeDriveRequest } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
 import { resolveExportFormat, exportKind } from './exportFormats.js';
-import { log, errorFields } from "./log.js";
 
 const GOOGLE_NATIVE_SERVERS: Record<string, string> = {
   'application/vnd.google-apps.document': 'Google Docs',
@@ -871,17 +870,19 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               ));
             }
 
-            const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
-            const response = await fetch(downloadUrl, {
-              headers: { 'Authorization': `Bearer ${accessToken}` },
-            });
-
-            if (!response.ok) {
-              const bodyText = await response.text().catch(() => '');
-              throw new DriveApiError(
-                `Failed to download file content${bodyText ? `: ${bodyText}` : ''} (${response.status})`,
-                response.status,
+            let body: Buffer;
+            try {
+              body = await makeDriveRequest(
+                `/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`,
+                accessToken,
+                {},
+                { responseType: 'bytes', maxBytes: MAX_FILE_SIZE },
               );
+            } catch (err) {
+              if (!(err instanceof ResponseTooLargeError)) throw err;
+              return formatDriveError(new Error(
+                `File '${name}' exceeds the 20MB limit. Open in browser instead: ${webViewLink}.`
+              ));
             }
 
             const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
@@ -891,44 +892,29 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             });
 
             if (kind === 'pdf') {
-              const arrayBuffer = await response.arrayBuffer();
-              // read before extraction: the PDF parser can detach the buffer
-              const bytes = arrayBuffer.byteLength;
-              let pdfText: PdfText | undefined;
-              let failure: string | undefined;
-              const startedAt = Date.now();
-              try {
-                pdfText = await extractPdfText(new Uint8Array(arrayBuffer));
-              } catch (err: any) {
-                failure = err?.message || 'the PDF could not be parsed';
-                log("error", "pdf_extraction_failed", {
-                  ...errorFields(err),
-                  bytes,
-                  elapsedMs: Date.now() - startedAt,
-                });
-              }
-
+              const pdf = await readPdf(body);
               let result: Record<string, unknown>;
-              if (!pdfText) {
+              if (pdf.outcome === 'failed') {
                 result = {
                   ...fileMeta,
                   extraction: 'failed',
-                  message: `Could not extract text from '${name}' because ${failure}. Open the file directly instead: ${webViewLink}`,
+                  message: `Could not extract text from '${name}' because ${pdf.reason}. Open the file directly instead: ${webViewLink}`,
                 };
-              } else if (pdfText.scanned) {
+              } else if (pdf.outcome === 'scanned') {
                 result = {
                   ...fileMeta,
                   extraction: 'scanned',
-                  pages: pdfText.pages,
-                  textPages: pdfText.textPages,
+                  pages: pdf.pages,
+                  textPages: pdf.textPages,
                   scanned: true,
                   message:
-                    `'${name}' is a scanned (image-only) PDF with ${pdfText.pages} page(s) and no text layer, ` +
+                    `'${name}' is a scanned (image-only) PDF with ${pdf.pages} page(s) and no text layer, ` +
                     `so there is no text to extract. Reading its contents would require rendering each page as ` +
                     `an image, which consumes a large number of tokens and is not supported by this connector. ` +
                     `Open the file directly instead: ${webViewLink}`,
                 };
               } else {
+                const pdfText = pdf.pdf;
                 const notes: string[] = [];
                 if (pdfText.textPages < pdfText.pages) {
                   notes.push(
@@ -956,23 +942,18 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             }
 
             if (kind === 'image') {
-              const arrayBuffer = await response.arrayBuffer();
-              // Node ≥22 is declared in package.json; Buffer is safe and avoids
-              // the O(n²) String.fromCharCode chunking required by btoa.
-              const base64Data = Buffer.from(arrayBuffer).toString('base64');
               const imageMeta = { ...fileMeta, extraction: 'image' as const };
               return {
                 content: [
                   jsonBlock(imageMeta),
-                  { type: 'image' as const, data: base64Data, mimeType },
+                  { type: 'image' as const, data: body.toString('base64'), mimeType },
                 ],
                 structuredContent: imageMeta,
               };
             }
 
             // kind === 'text'
-            const textContent = await response.text();
-            const result = { ...fileMeta, extraction: 'text' as const, content: textContent };
+            const result = { ...fileMeta, extraction: 'text' as const, content: body.toString('utf8') };
             return {
               content: [jsonBlock(result)],
               structuredContent: result,

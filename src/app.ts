@@ -22,7 +22,7 @@ export function createApp(grant: Grant | null) {
   // A fresh McpServer per request: an McpServer binds to one transport at a
   // time, so a shared one rejects overlapping requests with
   // "Already connected to a transport"
-  app.post(MCP_PATH, requireAccessToken, async (req: Request, res: Response) => {
+  app.post(MCP_PATH, requireAccessToken(grant), async (req: Request, res: Response) => {
     const server = createServer(grant);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

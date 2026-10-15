@@ -80,10 +80,6 @@ export function resolveGrant(profile = process.env.PROFILE): Grant | null {
   return { scopes: expandScopes(resolved.scopes), features: new Set(resolved.features) };
 }
 
-export function grantedScopes(profile = process.env.PROFILE): Set<string> | null {
-  return resolveGrant(profile)?.scopes ?? null;
-}
-
 export function isToolGranted(toolScope: string | undefined, grant: Grant | null): boolean {
   if (grant === null || !toolScope) return true;
   return grant.scopes.has(toolScope);

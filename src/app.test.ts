@@ -9,8 +9,8 @@ let httpServer: Server;
 let url: string;
 
 beforeAll(async () => {
-  // labels.ts reads PROFILE per call; this profile lacks the labels scope, so
-  // get_file_metadata makes a single Drive request
+  // This profile lacks the labels scope, so get_file_metadata makes a single
+  // Drive request
   process.env.PROFILE = 'standard-resources';
   httpServer = createApp(resolveGrant()).listen(0, '127.0.0.1');
   await new Promise((resolve) => httpServer.once('listening', resolve));

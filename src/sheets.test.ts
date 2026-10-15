@@ -149,7 +149,7 @@ function fakeSheets(tabs: FakeTab[], options: FakeOptions = {}) {
 
 function ctx(extra: Partial<SheetsContext> = {}): SheetsContext {
   return {
-    fileId: FILE_ID,
+    file: { id: FILE_ID },
     accessToken: 'tok',
     signal: new AbortController().signal,
     name: 'Budget',
@@ -591,7 +591,7 @@ describe('readSheet', () => {
   it('sends the resource key and the signal on every Sheets call', async () => {
     const fake = fakeSheets([{ title: 'A', rowCount: 1, columnCount: 1, data: [['a']] }]);
     const signal = new AbortController().signal;
-    await readText({ resourceKey: '0-key', signal });
+    await readText({ file: { id: FILE_ID, resourceKey: '0-key' }, signal });
     expect(fake.calls).toHaveLength(2);
     for (const call of fake.calls) {
       expect(new Headers(call.init?.headers).get('x-goog-drive-resource-keys')).toBe(`${FILE_ID}/0-key`);
@@ -616,7 +616,7 @@ describe('keyed-link fallback (D19)', () => {
   ])('%s falls back to the Drive CSV export with the key header', async (_label, opts) => {
     const fake = fakeSheets([], { ...opts, export: csvExport });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const text = await readText({ resourceKey: 'k1' });
+    const text = await readText({ file: { id: FILE_ID, resourceKey: 'k1' } });
 
     expect(text).toBe(`# Budget (first tab only)\n\n\`\`\`csv\nname,qty\n"a,1",2\n\`\`\`\n\n${NOTE}`);
     const exp = fake.calls.find((c) => c.url.includes('/export?'))!;
@@ -634,7 +634,7 @@ describe('keyed-link fallback (D19)', () => {
   ])('does not fall back on %s', async (_label, status, reason) => {
     const fake = fakeSheets([], { getStatus: status, getReason: reason, export: csvExport });
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => { fn(); return 0; }) as any);
-    const err = await readSheet(ctx({ resourceKey: 'k1' })).catch((e) => e);
+    const err = await readSheet(ctx({ file: { id: FILE_ID, resourceKey: 'k1' } })).catch((e) => e);
     expect(err).toBeInstanceOf(DriveApiError);
     expect(err.status).toBe(status);
     expect(fake.calls.some((c) => c.url.includes('/export?'))).toBe(false);
@@ -658,7 +658,7 @@ describe('keyed-link fallback (D19)', () => {
     }));
     const fake = fakeSheets(tabs, { failBatch: { n: 2, status: 404 }, export: csvExport });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const text = await readText({ resourceKey: 'k1' });
+    const text = await readText({ file: { id: FILE_ID, resourceKey: 'k1' } });
     expect(fake.batchUrls()).toHaveLength(2);
     expect(text).not.toContain('# Quarterly');
     expect(text).toContain('# Budget (first tab only)');
@@ -670,14 +670,14 @@ describe('keyed-link fallback (D19)', () => {
       export: () => new Response(errorBody(403, 'exportSizeLimitExceeded'), { status: 403 }),
     });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    expect(await readSheet(ctx({ resourceKey: 'k1' }))).toEqual({ detailsOnly: expect.stringContaining('10 MB') });
+    expect(await readSheet(ctx({ file: { id: FILE_ID, resourceKey: 'k1' } }))).toEqual({ detailsOnly: expect.stringContaining('10 MB') });
   });
 
   it('truncates a long fallback CSV at a line boundary inside the limit', async () => {
     const line = `${'c'.repeat(99)}\n`;
     fakeSheets([], { getStatus: 404, export: () => new Response(line.repeat(5000), { status: 200 }) });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const text = await readText({ resourceKey: 'k1' });
+    const text = await readText({ file: { id: FILE_ID, resourceKey: 'k1' } });
     expect(text.length).toBeLessThanOrEqual(MAX_TEXT_CHARS);
     expect(text).toMatch(/c{99}\n```\n\n\[Truncated at \d+ characters\. Full file: /);
     expect(text.endsWith(NOTE)).toBe(true);
@@ -686,7 +686,7 @@ describe('keyed-link fallback (D19)', () => {
   it('logs the fallback without ids', async () => {
     fakeSheets([], { getStatus: 404, export: csvExport });
     const written = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    await readText({ resourceKey: 'k1' });
+    await readText({ file: { id: FILE_ID, resourceKey: 'k1' } });
     const lines = written.mock.calls.map(([chunk]) => String(chunk));
     const record = lines.map((l) => JSON.parse(l)).find((r) => r.event === 'sheets_keyed_fallback');
     expect(record).toMatchObject({ level: 'info', status: 404 });
