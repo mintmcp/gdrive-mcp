@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { isToolGranted, SCOPES } from "./scopes.js";
+import { FEATURES, isFeatureGranted, isToolGranted, SCOPES } from "./scopes.js";
 import { registerResources } from "./resources.js";
 import { log, truncate } from "./log.js";
 
@@ -11,12 +11,14 @@ const SERVER_VERSION = "2.1.0";
 // each time would put that cost on every call
 const TOOLS = Object.entries(GoogleDriveTools.getTools()) as Array<[string, any]>;
 
-// Resources read files, so they need drive.readonly: every profile today
-export function resourcesGranted(granted: Set<string> | null): boolean {
-  return granted === null || granted.has(SCOPES.DRIVE_READONLY);
+// Resources are a profile feature: a connector opts in, so the ones already
+// serving customers keep the surface they were connected with. They read
+// files, so drive.readonly is required as well
+export function resourcesGranted(granted: Set<string> | null, features: Set<string> | null): boolean {
+  return isFeatureGranted(FEATURES.RESOURCES, features) && (granted === null || granted.has(SCOPES.DRIVE_READONLY));
 }
 
-export function logToolSurface(granted: Set<string> | null): void {
+export function logToolSurface(granted: Set<string> | null, features: Set<string> | null): void {
   const registered: string[] = [];
   const skipped: string[] = [];
   for (const [toolName, t] of TOOLS) {
@@ -27,7 +29,8 @@ export function logToolSurface(granted: Set<string> | null): void {
     scopes: granted === null ? "unrestricted" : [...granted],
     tools: registered,
     withheld: skipped,
-    resources: resourcesGranted(granted),
+    features: features === null ? "unrestricted" : [...features],
+    resources: resourcesGranted(granted, features),
   });
 }
 
@@ -85,7 +88,7 @@ function errorCodes(result: any): { status?: number; reason?: string; code?: str
   };
 }
 
-export function createServer(granted: Set<string> | null): McpServer {
+export function createServer(granted: Set<string> | null, features: Set<string> | null): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   for (const [toolName, t] of TOOLS) {
@@ -106,7 +109,7 @@ export function createServer(granted: Set<string> | null): McpServer {
     );
   }
 
-  if (resourcesGranted(granted)) registerResources(server);
+  if (resourcesGranted(granted, features)) registerResources(server);
 
   return server;
 }

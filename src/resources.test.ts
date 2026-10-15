@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { createServer, logToolSurface } from './server.js';
 import { requestContext } from './auth.js';
-import { grantedScopes, PROFILES } from './scopes.js';
+import { grantedFeatures, grantedScopes, PROFILES } from './scopes.js';
 import { EXTRACT_TIMEOUT_MS, MAX_TEXT_CHARS, type PdfText } from './pdfText.js';
 import { MAX_FILE_SIZE, TEXTUAL_APPLICATION_MIMES } from './tools.js';
 import { parseDriveSize, resourceListQuery } from './resources.js';
@@ -85,7 +85,7 @@ async function connect(profile?: string) {
   else process.env.PROFILE = profile;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.0' });
-  await createServer(grantedScopes()).connect(serverTransport);
+  await createServer(grantedScopes(), grantedFeatures()).connect(serverTransport);
   await client.connect(clientTransport);
   return client;
 }
@@ -94,19 +94,19 @@ function asUser<T>(run: () => Promise<T>, accessToken = TOKEN): Promise<T> {
   return requestContext.run({ accessToken }, run);
 }
 
-async function read(uri: string, profile = 'standard') {
+async function read(uri: string, profile = 'standard-resources') {
   const client = await connect(profile);
   return asUser(() => client.readResource({ uri }));
 }
 
-async function readError(uri: string, profile = 'standard'): Promise<McpError> {
+async function readError(uri: string, profile = 'standard-resources'): Promise<McpError> {
   const err = await read(uri, profile).catch((e) => e);
   expect(err).toBeInstanceOf(McpError);
   return err;
 }
 
 async function list(cursor?: string) {
-  const client = await connect('standard');
+  const client = await connect('standard-resources');
   return asUser(() => client.listResources(cursor ? { cursor } : {}));
 }
 
@@ -127,24 +127,40 @@ afterEach(() => {
 });
 
 describe('registration', () => {
-  it.each([undefined, ...Object.keys(PROFILES)])('advertises resources: {} for profile %s', async (profile) => {
+  it.each([undefined, 'standard-resources', 'full'])('advertises resources: {} for profile %s', async (profile) => {
     const client = await connect(profile);
     expect(client.getServerCapabilities()?.resources).toEqual({});
   });
 
-  it('logs the resource surface with the tool surface', () => {
-    logToolSurface(grantedScopes('standard'));
-    expect(records()[0]).toMatchObject({ event: 'tool_surface', resources: true });
+  it.each(['standard', 'labels'])('profile %s keeps its surface: no resources', async (profile) => {
+    const client = await connect(profile);
+    expect(client.getServerCapabilities()).not.toHaveProperty('resources');
   });
 
-  it('withholds resources when drive.readonly is not granted', () => {
-    logToolSurface(new Set(['https://www.googleapis.com/auth/drive.file']));
+  it('every profile either carries the resources feature or withholds resources', async () => {
+    for (const profile of Object.keys(PROFILES)) {
+      const client = await connect(profile);
+      const advertised = client.getServerCapabilities()?.resources !== undefined;
+      expect(advertised).toBe(grantedFeatures(profile)!.has('resources'));
+    }
+  });
+
+  it('logs the resource surface with the tool surface', () => {
+    logToolSurface(grantedScopes('standard-resources'), grantedFeatures('standard-resources'));
+    expect(records()[0]).toMatchObject({ event: 'tool_surface', features: ['resources'], resources: true });
+    logToolSurface(grantedScopes('standard'), grantedFeatures('standard'));
+    expect(records()[1]).toMatchObject({ event: 'tool_surface', features: [], resources: false });
+  });
+
+  it('withholds resources when drive.readonly is not granted, whatever the feature says', () => {
+    const fileOnly = new Set(['https://www.googleapis.com/auth/drive.file']);
+    logToolSurface(fileOnly, null);
     expect(records()[0]).toMatchObject({ resources: false });
-    expect(createServer(new Set(['https://www.googleapis.com/auth/drive.file'])).server.getCapabilities?.()).not.toHaveProperty('resources');
+    expect(createServer(fileOnly, null).server.getCapabilities?.()).not.toHaveProperty('resources');
   });
 
   it('answers resources/templates/list with an empty list', async () => {
-    const client = await connect('standard');
+    const client = await connect('standard-resources');
     expect(await asUser(() => client.listResourceTemplates())).toEqual({ resourceTemplates: [] });
   });
 });
@@ -277,7 +293,7 @@ describe('resources/list', () => {
 
   it('maps a Drive 400 on a cursor to -32602', async () => {
     stubFetch([[isList, () => googleError(400, 'invalid', 'Invalid Value')]]);
-    const client = await connect('standard');
+    const client = await connect('standard-resources');
     const err = await asUser(() => client.listResources({ cursor: 'stale' })).catch((e) => e);
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(-32602);
@@ -286,7 +302,7 @@ describe('resources/list', () => {
 
   it('maps other list failures to -32603 with the formatDriveError text', async () => {
     stubFetch([[isList, () => googleError(401, 'authError')]]);
-    const client = await connect('standard');
+    const client = await connect('standard-resources');
     const err = await asUser(() => client.listResources()).catch((e) => e);
     expect(err.code).toBe(-32603);
     expect(err.message).toMatch(/reconnect/);
@@ -303,7 +319,7 @@ describe('client compatibility (SDK Client over InMemoryTransport)', () => {
       [isMeta, () => json(meta('text/plain', { size: '5' }))],
       ['alt=media', () => new Response('hello', { status: 200 })],
     ]);
-    const client = await connect('standard');
+    const client = await connect('standard-resources');
     expect(client.getServerCapabilities()?.resources).toEqual({});
     const first = await asUser(() => client.listResources());
     const second = await asUser(() => client.listResources({ cursor: first.nextCursor }));
@@ -564,7 +580,7 @@ describe('resources/read', () => {
         ['alt=media', () => new Response('x', { status: 200 })],
         ...LABEL_ROUTES,
       ]);
-      await read(WEB(), 'labels');
+      await read(WEB(), 'full');
       for (const c of calls) expect(keyHeader(c.init)).toBeNull();
     });
 
@@ -575,7 +591,7 @@ describe('resources/read', () => {
         ['alt=media', () => new Response('x', { status: 200 })],
         ['listLabels', () => json(++page === 1 ? { labels: [], nextPageToken: 'lp2' } : { labels: [] })],
       ]);
-      await read(KEYED, 'labels');
+      await read(KEYED, 'full');
       const drive = calls.filter((c) => c.url.includes('/drive/v3/'));
       expect(drive.map((c) => (c.url.includes('listLabels') ? 'labels' : c.url.includes('alt=media') ? 'download' : 'meta')).sort())
         .toEqual(['download', 'labels', 'labels', 'meta']);
@@ -617,7 +633,7 @@ describe('resources/read', () => {
       ]);
     });
 
-    it('reads labels on the labels profile when both content and labels need the key (R3)', async () => {
+    it('reads labels on a profile with the labels scope when both content and labels need the key (R3)', async () => {
       const needsKey = (ok: Handler): Handler => (url, init) =>
         keyHeader(init) === `${ID}/${KEY}` ? ok(url, init) : googleError(404, 'notFound');
       stubFetch([
@@ -626,14 +642,14 @@ describe('resources/read', () => {
         ['listLabels', needsKey(LABEL_ROUTES[0][1])],
         LABEL_ROUTES[1],
       ]);
-      const result = await read(KEYED, 'labels');
+      const result = await read(KEYED, 'full');
       expect(result._meta).toEqual(EXPECTED_LABELS);
     });
   });
 
   describe('labels (D11)', () => {
     async function getFileMeta(fileId: string) {
-      const client = await connect('labels');
+      const client = await connect('full');
       const result = await asUser(() => client.callTool({ name: 'get_file', arguments: { file_id: fileId } }));
       return result._meta;
     }
@@ -645,7 +661,7 @@ describe('resources/read', () => {
     ])('attaches the same _meta as get_file on %s', async (_label, mimeType, extra) => {
       const size = mimeType === 'application/pdf' ? String(MAX_FILE_SIZE + 1) : '1';
       stubFetch([[isMeta, () => json(meta(mimeType, { size }))], ...extra(), ...LABEL_ROUTES]);
-      const result = await read(WEB(), 'labels');
+      const result = await read(WEB(), 'full');
       expect(result._meta).toEqual(EXPECTED_LABELS);
       expect(result._meta).toEqual(await getFileMeta(ID));
     });
@@ -656,7 +672,7 @@ describe('resources/read', () => {
         ['alt=media', () => new Response('x', { status: 200 })],
         ['listLabels', () => googleError(400, 'badRequest')],
       ]);
-      const result = await read(WEB(), 'labels');
+      const result = await read(WEB(), 'full');
       expect(result._meta).toEqual({ applied: [], labelsError: 'label read failed' });
       expect(result._meta).toEqual(await getFileMeta(ID));
     });
@@ -667,7 +683,7 @@ describe('resources/read', () => {
         ['alt=media', () => new Response('x', { status: 200 })],
         ...LABEL_ROUTES,
       ]);
-      const result = await read(WEB(), 'standard');
+      const result = await read(WEB(), 'standard-resources');
       expect(result).not.toHaveProperty('_meta');
       expect(calls.some((c) => c.url.includes('listLabels') || c.url.includes('drivelabels'))).toBe(false);
     });
@@ -691,7 +707,7 @@ describe('resources/read', () => {
         }],
         LABEL_ROUTES[1],
       ]);
-      const result = await read(WEB(), 'labels');
+      const result = await read(WEB(), 'full');
       expect(labelsStartedBeforeMeta).toBe(true);
       expect(result._meta).toEqual(EXPECTED_LABELS);
     });
@@ -719,7 +735,7 @@ describe('resources/read', () => {
           return stall(init);
         }],
       ]);
-      const { pending, isSettled } = await readWithClock(WEB(), 'labels');
+      const { pending, isSettled } = await readWithClock(WEB(), 'full');
       await vi.advanceTimersByTimeAsync(RESOURCE_READ_DEADLINE_MS - 1);
       expect(isSettled()).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
@@ -741,7 +757,7 @@ describe('resources/read', () => {
         }],
         ['sheets.googleapis.com', () => json({ sheets: [{ properties: { sheetId: 0, title: 'T', index: 0, sheetType: 'GRID', gridProperties: { rowCount: 1, columnCount: 1 } } }] })],
       ]);
-      const { pending } = await readWithClock(`https://docs.google.com/spreadsheets/d/${ID}/edit`, 'standard');
+      const { pending } = await readWithClock(`https://docs.google.com/spreadsheets/d/${ID}/edit`, 'standard-resources');
       await vi.advanceTimersByTimeAsync(RESOURCE_READ_DEADLINE_MS);
       const outcome: any = await pending;
       expect(outcome.err.code).toBe(-32603);
@@ -761,7 +777,7 @@ describe('resources/read', () => {
         ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
         ...LABEL_ROUTES,
       ]);
-      const { pending, isSettled } = await readWithClock(WEB(), 'labels');
+      const { pending, isSettled } = await readWithClock(WEB(), 'full');
       await vi.advanceTimersByTimeAsync(1);
       expect(extractionStarted).toBe(true);
       expect(calls.some((c) => c.url.includes('drivelabels'))).toBe(true);
@@ -785,7 +801,7 @@ describe('resources/read', () => {
         [isMeta, () => json(meta('application/pdf', { size: '10' }))],
         ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
       ]);
-      const { pending } = await readWithClock(WEB(), 'standard');
+      const { pending } = await readWithClock(WEB(), 'standard-resources');
       await vi.advanceTimersByTimeAsync(RESOURCE_READ_DEADLINE_MS);
       fail(new Error('text extraction exceeded 10000ms'));
       const outcome: any = await pending;
@@ -805,7 +821,7 @@ describe('resources/read', () => {
         [isMeta, () => json(meta('application/pdf', { size: '10' }))],
         ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
       ]);
-      const { pending } = await readWithClock(WEB(), 'standard');
+      const { pending } = await readWithClock(WEB(), 'standard-resources');
       const outcome: any = await pending;
       expect(outcome.ok).toBeUndefined();
       expect(outcome.err.code).toBe(-32603);
@@ -822,7 +838,7 @@ describe('resources/read', () => {
         [isMeta, () => json(meta('application/pdf', { size: '10' }))],
         ['alt=media', () => new Response(Buffer.from('%PDF-1.4'), { status: 200 })],
       ]);
-      const { pending } = await readWithClock(WEB(), 'standard');
+      const { pending } = await readWithClock(WEB(), 'standard-resources');
       const outcome: any = await pending;
       expect(outcome.ok.contents[0]).toMatchObject({ mimeType: 'text/plain' });
     });
@@ -836,7 +852,7 @@ describe('resources/read', () => {
           return stall(init);
         }],
       ]);
-      const { pending, isSettled } = await readWithClock(WEB(), 'labels');
+      const { pending, isSettled } = await readWithClock(WEB(), 'full');
       await vi.advanceTimersByTimeAsync(1);
       expect(isSettled()).toBe(true);
       const outcome: any = await pending;

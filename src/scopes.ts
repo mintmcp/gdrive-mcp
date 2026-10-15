@@ -5,14 +5,30 @@ export const SCOPES = {
   DRIVE_LABELS_READONLY: "https://www.googleapis.com/auth/drive.labels.readonly",
 } as const;
 
+// A feature is a capability a profile opts into that no Google scope
+// distinguishes, so it can't ride on the scope set the way label enrichment
+// does. Adding one to a frozen profile changes what its existing users get
+export const FEATURES = {
+  RESOURCES: "resources",
+} as const;
+
+export type Profile = {
+  scopes: readonly string[];
+  features: readonly string[];
+};
+
+const STANDARD_SCOPES = [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE];
+const ALL_FEATURES = Object.values(FEATURES);
+
 // Editing a profile forces every user of its connector to re-consent, so
 // frozen profiles never change. `full` is the evolving exception: its users
 // accept re-consent as it grows. Keep each profile matching the scopes its
 // brokered mcp-registry entry requests
-export const PROFILES: Record<string, readonly string[]> = {
-  "standard": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE],
-  "labels": [SCOPES.DRIVE_READONLY, SCOPES.DRIVE_FILE, SCOPES.DRIVE_LABELS_READONLY],
-  "full": [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY],
+export const PROFILES: Record<string, Profile> = {
+  "standard": { scopes: STANDARD_SCOPES, features: [] },
+  "standard-resources": { scopes: STANDARD_SCOPES, features: [FEATURES.RESOURCES] },
+  "labels": { scopes: [...STANDARD_SCOPES, SCOPES.DRIVE_LABELS_READONLY], features: [] },
+  "full": { scopes: [SCOPES.DRIVE, SCOPES.DRIVE_LABELS_READONLY], features: ALL_FEATURES },
 };
 
 // Google's scope hierarchy, not our policy: full drive is a superset of the
@@ -31,10 +47,10 @@ export function expandScopes(granted: Iterable<string>): Set<string> {
 }
 
 /**
- * Unset means every tool registers (self-hosted default). An unknown or
- * empty profile throws so a misdeploy fails at boot, not silently
+ * Unset means every tool and feature registers (self-hosted default). An
+ * unknown or empty profile throws so a misdeploy fails at boot, not silently
  */
-export function grantedScopes(profile = process.env.PROFILE): Set<string> | null {
+function resolveProfile(profile: string | undefined): Profile | null {
   if (profile === undefined) return null;
 
   const name = profile.trim();
@@ -42,13 +58,27 @@ export function grantedScopes(profile = process.env.PROFILE): Set<string> | null
     throw new Error("PROFILE is set but empty. Unset it to register every tool.");
   }
 
-  const scopes = PROFILES[name];
-  if (!scopes) {
+  const resolved = PROFILES[name];
+  if (!resolved) {
     throw new Error(
       `Unknown PROFILE "${name}". Known profiles: ${Object.keys(PROFILES).join(", ")}.`,
     );
   }
-  return expandScopes(scopes);
+  return resolved;
+}
+
+export function grantedScopes(profile = process.env.PROFILE): Set<string> | null {
+  const resolved = resolveProfile(profile);
+  return resolved === null ? null : expandScopes(resolved.scopes);
+}
+
+export function grantedFeatures(profile = process.env.PROFILE): Set<string> | null {
+  const resolved = resolveProfile(profile);
+  return resolved === null ? null : new Set(resolved.features);
+}
+
+export function isFeatureGranted(feature: string, granted: Set<string> | null): boolean {
+  return granted === null || granted.has(feature);
 }
 
 export function isToolGranted(toolScope: string | undefined, granted: Set<string> | null): boolean {

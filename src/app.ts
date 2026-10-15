@@ -7,7 +7,7 @@ import { log, errorFields } from "./log.js";
 
 export const MCP_PATH = "/mcp";
 
-export function createApp(granted: Set<string> | null) {
+export function createApp(granted: Set<string> | null, features: Set<string> | null) {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
@@ -22,7 +22,7 @@ export function createApp(granted: Set<string> | null) {
   // time, so a shared one rejects overlapping requests with
   // "Already connected to a transport"
   app.post(MCP_PATH, requireAccessToken, async (req: Request, res: Response) => {
-    const server = createServer(granted);
+    const server = createServer(granted, features);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });

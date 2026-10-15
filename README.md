@@ -80,8 +80,11 @@ is returned; absence means "surfacing not enabled", never "no labels".
 The server also serves MCP resources (capability `resources: {}`, no
 `subscribe` or `listChanged`), so a client such as Claude's Project
 **Context** picker can list Drive files and add them as text. Resources are
-on whenever the grant includes `drive.readonly`, which is every profile.
-The boot log's `tool_surface` line says `resources: true|false`.
+a profile **feature** (see [Profiles](#profiles)): only a profile that lists
+`resources` serves them, and the grant must include `drive.readonly`. Today
+that is `standard-resources` and `full`; `standard` and `labels` keep the
+surface their users connected with. The boot log's `tool_surface` line says
+`resources: true|false`.
 
 **`resources/list`** returns one page of recent files, newest first
 (`modifiedTime desc`, 50 per page, My Drive and every shared drive, trashed
@@ -157,27 +160,35 @@ allowed folders.
 
 ## Profiles
 
-A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named scope set —
-a connector's contract with its users:
+A **profile** (`PROFILES` in `src/scopes.ts`) is a frozen, named set of
+scopes and features — a connector's contract with its users:
 
-| Profile           | Scopes                                                    |
-|-------------------|-----------------------------------------------------------|
-| `standard`        | `drive.readonly` + `drive.file`                           |
-| `labels` | `drive.readonly` + `drive.file` + `drive.labels.readonly` |
-| `full`            | `drive` + `drive.labels.readonly`                         |
+| Profile              | Scopes                                                    | Features    |
+|----------------------|-----------------------------------------------------------|-------------|
+| `standard`           | `drive.readonly` + `drive.file`                           |             |
+| `standard-resources` | `drive.readonly` + `drive.file`                           | `resources` |
+| `labels`             | `drive.readonly` + `drive.file` + `drive.labels.readonly` |             |
+| `full`               | `drive` + `drive.labels.readonly`                         | all         |
+
+A **feature** (`FEATURES` in `src/scopes.ts`) is a capability no Google
+scope distinguishes, so it can't ride on the scope set the way label
+enrichment does. `resources` is the first. Two profiles with the same
+scopes and different features request the same Google grant, so a user can
+move from one connector to the other without a new consent screen.
 
 Each tool declares the Google scope it needs (the first argument to
 `requirePermissionSecure` in `src/tools.ts`):
 
 | Scope                   | Tools                                                   |
 |-------------------------|---------------------------------------------------------|
-| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions`, and the [resources](#resources) |
+| `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions`, and the [resources](#resources) (with the `resources` feature) |
 | `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
 | `drive.labels.readonly` | `get_file` and `resources/read` label enrichment (`_meta`), no tool of its own |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the
-server registers only the tools that profile's scopes cover, so a tool is
-never advertised that can only ever return 403. Full `drive` counts as
+server registers only the tools that profile's scopes cover and the
+features it lists, so a tool is never advertised that can only ever return
+403. Full `drive` counts as
 covering `drive.file` and `drive.readonly`, because Google's grant is a
 superset. An unknown profile name crashes at boot rather than silently
 serving every tool; the boot log prints the granted scope set and the
@@ -185,10 +196,12 @@ resulting tool list.
 
 **Frozen profiles never change.** Editing a profile's scopes forces every
 user of its connectors to re-consent in Google — the thing this design
-exists to avoid. A new scope lands in `full` first, and gets a frozen
-profile of its own (a new entry in `deployments.yml` plus a new registry
-entry) only when someone wants it in isolation. Existing connectors keep
-working untouched, forever.
+exists to avoid. Adding a feature to a frozen profile changes what its
+existing users get without warning, which is the same kind of break. A new
+scope or feature lands in `full` first, and gets a frozen profile of its
+own (a new entry in `deployments.yml` plus a new registry entry) only when
+someone wants it in isolation. Existing connectors keep working untouched,
+forever.
 
 **`full` is the evolving profile.** It always covers everything the
 connector can do, and it grows: choosing it is consent to future scope
@@ -197,10 +210,10 @@ with a "reconnect your Google account" hint until they reconnect. Update
 the brokered registry entry's scopes in the same change — nothing validates
 the two against each other yet.
 
-**Unset means every tool registers.** That is the default for anyone running
-their own copy who hasn't thought about scopes yet. Shipping a tool that
-needs a scope no profile grants is therefore safe: it stays invisible
-everywhere until a profile lists that scope.
+**Unset means every tool and feature registers.** That is the default for
+anyone running their own copy who hasn't thought about scopes yet. Shipping
+a tool that needs a scope no profile grants, or a feature no profile lists,
+is therefore safe: it stays invisible everywhere until a profile lists it.
 
 ## Local development
 
@@ -247,10 +260,11 @@ from it, so every live entry for the triggered environment deploys from the
 same commit — nothing can quietly fall out of the deploy path. Each entry
 names its `profile`, injected as `PROFILE` at deploy time.
 
-Adding a deployment that needs a different scope set (a connector with
-`drive.labels.readonly`, say) is one new profile and one new entry, not a
-branch and not a release: existing apps redeploy unchanged and withhold the
-new tools, and the new app registers them.
+Adding a deployment that needs a different scope or feature set (a
+connector with `drive.labels.readonly`, say, or one that serves resources)
+is one new profile and one new entry, not a branch and not a release:
+existing apps redeploy unchanged and withhold the new tools, and the new
+app registers them.
 
 ## Hosting a copy on MintMCP
 

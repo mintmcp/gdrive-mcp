@@ -2,17 +2,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp, MCP_PATH } from './app.js';
-import { grantedScopes } from './scopes.js';
+import { grantedFeatures, grantedScopes } from './scopes.js';
 
 const realFetch = globalThis.fetch;
 let httpServer: Server;
 let url: string;
 
 beforeAll(async () => {
-  // labels.ts reads PROFILE per call; standard lacks the labels scope, so
+  // labels.ts reads PROFILE per call; this profile lacks the labels scope, so
   // get_file_metadata makes a single Drive request
-  process.env.PROFILE = 'standard';
-  httpServer = createApp(grantedScopes()).listen(0, '127.0.0.1');
+  process.env.PROFILE = 'standard-resources';
+  httpServer = createApp(grantedScopes(), grantedFeatures()).listen(0, '127.0.0.1');
   await new Promise((resolve) => httpServer.once('listening', resolve));
   url = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}${MCP_PATH}`;
 });

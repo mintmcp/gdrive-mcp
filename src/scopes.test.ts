@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { PROFILES, SCOPES, expandScopes, grantedScopes, isToolGranted } from "./scopes.js";
+import { FEATURES, PROFILES, SCOPES, expandScopes, grantedFeatures, grantedScopes, isToolGranted } from "./scopes.js";
 import { createServer } from "./server.js";
 
 describe("expandScopes", () => {
@@ -45,6 +45,35 @@ describe("grantedScopes", () => {
   });
 });
 
+describe("grantedFeatures", () => {
+  test("unset means every feature", () => {
+    expect(grantedFeatures(undefined)).toBeNull();
+  });
+
+  test("standard carries no feature", () => {
+    expect(grantedFeatures("standard")).toEqual(new Set());
+  });
+
+  test("standard-resources has the scopes of standard plus the resources feature", () => {
+    expect(grantedScopes("standard-resources")).toEqual(grantedScopes("standard"));
+    expect(grantedFeatures("standard-resources")).toEqual(new Set([FEATURES.RESOURCES]));
+  });
+
+  test("full carries every feature", () => {
+    expect(grantedFeatures("full")).toEqual(new Set(Object.values(FEATURES)));
+  });
+
+  test("an unknown profile fails the same way as for scopes", () => {
+    expect(() => grantedFeatures("readonly")).toThrow(/unknown profile/i);
+  });
+
+  test("every profile lists only known features", () => {
+    for (const profile of Object.values(PROFILES)) {
+      expect(Object.values(FEATURES)).toEqual(expect.arrayContaining([...profile.features]));
+    }
+  });
+});
+
 describe("isToolGranted", () => {
   test("a tool with no declared scope is always granted", () => {
     expect(isToolGranted(undefined, new Set())).toBe(true);
@@ -56,7 +85,7 @@ describe("isToolGranted", () => {
 });
 
 function toolNames(granted: Set<string> | null): string[] {
-  const server = createServer(granted);
+  const server = createServer(granted, null);
   return Object.keys((server as any)._registeredTools ?? {}).sort();
 }
 
