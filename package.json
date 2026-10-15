@@ -16,6 +16,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.1",
     "express": "^4.21.2",
+    "fflate": "^0.8.3",
     "unpdf": "^1.8.0",
     "zod": "^4.3.6"
   },
