@@ -1,26 +1,40 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { isToolGranted } from "./scopes.js";
+import { isFeatureGranted, isToolGranted, type Grant } from "./scopes.js";
+import { FEATURE_REGISTRY } from "./features.js";
 import { log, truncate } from "./log.js";
 
 const SERVER_NAME = "Google Drive";
-const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "2.1.0";
 
 // Built once: createServer runs per request, and rebuilding every Zod shape
 // each time would put that cost on every call
 const TOOLS = Object.entries(GoogleDriveTools.getTools()) as Array<[string, any]>;
 
-export function logToolSurface(granted: Set<string> | null): void {
+// A feature is a profile opt-in (a connector keeps the surface its users
+// connected with) and, like a tool, needs its scope granted
+function featureGranted(name: string, grant: Grant | null): boolean {
+  return isFeatureGranted(name, grant) && isToolGranted(FEATURE_REGISTRY[name].scope, grant);
+}
+
+export function logToolSurface(grant: Grant | null): void {
   const registered: string[] = [];
   const skipped: string[] = [];
   for (const [toolName, t] of TOOLS) {
-    (isToolGranted(t.handler?.scope, granted) ? registered : skipped).push(toolName);
+    (isToolGranted(t.handler?.scope, grant) ? registered : skipped).push(toolName);
+  }
+  const features: string[] = [];
+  const withheldFeatures: string[] = [];
+  for (const name of Object.keys(FEATURE_REGISTRY)) {
+    (featureGranted(name, grant) ? features : withheldFeatures).push(name);
   }
 
   log("info", "tool_surface", {
-    scopes: granted === null ? "unrestricted" : [...granted],
+    scopes: grant === null ? "unrestricted" : [...grant.scopes],
     tools: registered,
     withheld: skipped,
+    features,
+    withheldFeatures,
   });
 }
 
@@ -78,11 +92,11 @@ function errorCodes(result: any): { status?: number; reason?: string; code?: str
   };
 }
 
-export function createServer(granted: Set<string> | null): McpServer {
+export function createServer(grant: Grant | null): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   for (const [toolName, t] of TOOLS) {
-    if (!isToolGranted(t.handler?.scope, granted)) continue;
+    if (!isToolGranted(t.handler?.scope, grant)) continue;
 
     server.registerTool(
       toolName,
@@ -97,6 +111,10 @@ export function createServer(granted: Set<string> | null): McpServer {
       },
       logToolErrors(toolName, (args) => t.handler(args)),
     );
+  }
+
+  for (const [name, feature] of Object.entries(FEATURE_REGISTRY)) {
+    if (featureGranted(name, grant)) feature.register(server);
   }
 
   return server;

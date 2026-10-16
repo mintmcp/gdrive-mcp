@@ -1,4 +1,4 @@
-# profile names a frozen scope set from PROFILES in src/scopes.ts
+# profile names a frozen scope and feature set from PROFILES in src/scopes.ts
 
 - app: gdrive-mintmcp-staging
   env: staging
@@ -14,3 +14,8 @@
   env: prod
   live: true
   profile: labels # standard + drive.labels.readonly
+
+- app: gdrive-mintmcp-resources
+  env: prod
+  live: true
+  profile: standard-resources # standard scopes + MCP resources

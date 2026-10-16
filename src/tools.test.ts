@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  classifyMime,
   escapeDriveQValue,
   isSelfMove,
   validateWorkspaceDomain,
@@ -15,7 +14,9 @@ import {
   GoogleDriveTools,
 } from './tools.js';
 import { requestContext } from './auth.js';
-import { MAX_TEXT_CHARS } from './pdfText.js';
+import { resolveGrant } from './scopes.js';
+import { classifyMime } from './mime.js';
+import { MAX_TEXT_CHARS } from './limits.js';
 import { stubFetch, jsonResponse } from './testStubs.js';
 
 describe('escapeDriveQValue', () => {
@@ -466,7 +467,7 @@ describe('get_file handler _meta', () => {
 
   const getFile = (GoogleDriveTools.getTools() as any).get_file.handler;
   const callGetFile = (fileId: string) =>
-    requestContext.run({ accessToken: 'tok' }, () => getFile({ file_id: fileId }));
+    requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () => getFile({ file_id: fileId }));
 
   const FILE_META = { id: 'f1', name: 'a.txt', mimeType: 'text/plain', size: '5', webViewLink: 'https://x' };
   const metaRoute: [string, (url: string) => Response] = [
@@ -547,7 +548,7 @@ describe('get_file handler _meta', () => {
       labelsRoute,
       labelInfoRoute,
     ]);
-    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+    const res = await requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
       (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
     expect(res.isError).toBeUndefined();
     expect(res.structuredContent.labels).toEqual([{
@@ -561,7 +562,7 @@ describe('get_file handler _meta', () => {
   it('get_file_metadata omits labels entirely when the profile lacks the scope', async () => {
     process.env.PROFILE = 'standard';
     const calls = stubFetch([['md5Checksum', () => jsonResponse(FILE_META)]]);
-    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+    const res = await requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
       (GoogleDriveTools.getTools() as any).get_file_metadata.handler({ file_id: 'f1' }));
     expect(res.isError).toBeUndefined();
     expect(res.structuredContent.labels).toBeUndefined();
@@ -588,7 +589,7 @@ describe('copy_file handler', () => {
 
   const copyQuery = async (args: Record<string, unknown>) => {
     const calls = stubFetch([['/files/f1/copy', () => jsonResponse({ id: 'f2', name: 'b', mimeType: 'text/plain' })]]);
-    const res = await requestContext.run({ accessToken: 'tok' }, () =>
+    const res = await requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
       (GoogleDriveTools.getTools() as any).copy_file.handler({ file_id: 'f1', ...args }));
     expect(res.isError).toBeUndefined();
     return new URL(calls[0].url).searchParams;
@@ -614,7 +615,7 @@ describe('export_file handler', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const exportFile = (args: Record<string, unknown>) =>
-    requestContext.run({ accessToken: 'tok' }, () =>
+    requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
       (GoogleDriveTools.getTools() as any).export_file.handler({ file_id: 'd1', ...args }));
 
   const DOC_META = {

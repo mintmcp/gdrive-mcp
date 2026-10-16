@@ -216,3 +216,58 @@ describe('getFileLabels', () => {
   });
 });
 
+
+describe('label read options (resource key and signal)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const keyHeader = (init?: RequestInit) => new Headers(init?.headers).get('x-goog-drive-resource-keys');
+
+  it('sends the resource key on every listLabels page and the signal on every label call', async () => {
+    let page = 0;
+    const calls = stubFetch([
+      ['listLabels', () => jsonResponse(++page === 1
+        ? { labels: [{ id: 'lbl1', revisionId: 'r1' }], nextPageToken: 'p2' }
+        : { labels: [{ id: 'lbl2', revisionId: 'r2' }] })],
+      ['drivelabels.googleapis.com', () => jsonResponse({ properties: { title: 'T' }, ...LABEL_SCHEMA_BODY })],
+    ]);
+    const controller = new AbortController();
+    const res = await getFileLabels('f1', 'tok', { resourceKey: '0-key', signal: controller.signal });
+
+    expect(res.error).toBeUndefined();
+    const list = calls.filter((c) => c.url.includes('listLabels'));
+    expect(list).toHaveLength(2);
+    for (const c of list) expect(keyHeader(c.init)).toBe('f1/0-key');
+    expect(calls).toHaveLength(4);
+    for (const c of calls) expect(c.init?.signal).toBe(controller.signal);
+  });
+
+  it('sends no key header and no signal without options, as get_file does', async () => {
+    const calls = stubFetch([['listLabels', () => jsonResponse({ labels: [] })]]);
+    await getFileLabels('f1', 'tok');
+    expect(keyHeader(calls[0].init)).toBeNull();
+    expect(calls[0].init?.signal).toBeUndefined();
+  });
+
+  it('getLabelInfo takes the signal as an optional fourth argument', async () => {
+    const calls = stubFetch([['drivelabels.googleapis.com', () => jsonResponse(LABEL_SCHEMA_BODY)]]);
+    const controller = new AbortController();
+    await getLabelInfo('lbl1', 'rev7', 'tok', { signal: controller.signal });
+    expect(calls[0].init?.signal).toBe(controller.signal);
+  });
+
+  it('a keyed file whose listLabels needs the key reads its labels', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: any, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('listLabels')) {
+        return keyHeader(init) === 'f1/k1'
+          ? jsonResponse({ labels: [{ id: 'lbl1', revisionId: 'r1' }] })
+          : jsonResponse({ error: { code: 404, message: 'File not found', errors: [{ reason: 'notFound' }] } }, 404);
+      }
+      return jsonResponse({ properties: { title: 'T' }, ...LABEL_SCHEMA_BODY });
+    }));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    expect((await getFileLabels('f1', 'tok', { resourceKey: 'k1' })).error).toBeUndefined();
+    expect((await getFileLabels('f1', 'tok')).error).toBe('label read failed');
+    vi.restoreAllMocks();
+  });
+});

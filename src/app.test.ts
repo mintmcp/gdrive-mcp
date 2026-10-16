@@ -2,17 +2,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp, MCP_PATH } from './app.js';
-import { grantedScopes } from './scopes.js';
+import { resolveGrant } from './scopes.js';
 
 const realFetch = globalThis.fetch;
 let httpServer: Server;
 let url: string;
 
 beforeAll(async () => {
-  // labels.ts reads PROFILE per call; standard lacks the labels scope, so
-  // get_file_metadata makes a single Drive request
-  process.env.PROFILE = 'standard';
-  httpServer = createApp(grantedScopes()).listen(0, '127.0.0.1');
+  // This profile lacks the labels scope, so get_file_metadata makes a single
+  // Drive request
+  process.env.PROFILE = 'standard-resources';
+  httpServer = createApp(resolveGrant()).listen(0, '127.0.0.1');
   await new Promise((resolve) => httpServer.once('listening', resolve));
   url = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}${MCP_PATH}`;
 });
@@ -74,5 +74,38 @@ describe('concurrent MCP requests', () => {
       expect(message.result.isError).toBeUndefined();
       expect(message.result.structuredContent.name).toBe(`token-${i + 1}`);
     });
+  });
+});
+
+describe('auth gate', () => {
+  async function post(body: unknown) {
+    return realFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each(['resources/list', 'resources/read', 'resources/templates/list'])(
+    'answers %s without a token with 401 and WWW-Authenticate',
+    async (method) => {
+      const res = await post({ jsonrpc: '2.0', id: 7, method, params: method === 'resources/read' ? { uri: 'https://drive.google.com/file/d/1234567890ab/view' } : {} });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toMatch(/^Bearer realm="gdrive-mcp", error="invalid_token"/);
+      expect((await res.json()).id).toBe(7);
+    },
+  );
+
+  it('keeps initialize open without a token', async () => {
+    const res = await post({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'probe', version: '0' } },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    const data = body.split('\n').find((line) => line.startsWith('data: '));
+    expect(JSON.parse(data ? data.slice(6) : body).result.capabilities.resources).toEqual({});
   });
 });

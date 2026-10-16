@@ -1,15 +1,22 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { RequestHandler } from "express";
 import { jsonRpcError, messagesOf, responseIdFor } from "./jsonrpc.js";
+import type { Grant } from "./scopes.js";
 
 export interface RequestContext {
   accessToken: string;
+  // The deployment's profile, resolved once at boot; null is unrestricted
+  grant: Grant | null;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
 
 export function getAccessToken(): string | undefined {
   return requestContext.getStore()?.accessToken;
+}
+
+export function getGrant(): Grant | null {
+  return requestContext.getStore()?.grant ?? null;
 }
 
 export const NOT_CONNECTED_MESSAGE =
@@ -21,15 +28,20 @@ export function bearerTokenFromHeader(header: string | undefined): string {
   return header?.match(/^Bearer\s+(.*)$/i)?.[1].trim() ?? "";
 }
 
+const TOKEN_METHODS = new Set([
+  "tools/list",
+  "tools/call",
+  "resources/list",
+  "resources/read",
+  "resources/templates/list",
+]);
+
 export function requiresAccessToken(body: unknown): boolean {
-  return messagesOf(body).some(
-    (message) =>
-      message.method === "tools/list" || message.method === "tools/call",
-  );
+  return messagesOf(body).some((message) => TOKEN_METHODS.has(message.method ?? ""));
 }
 
 // initialize stays open because MintMCP uses it for Fly readiness probes.
-export const requireAccessToken: RequestHandler = (req, res, next) => {
+export const requireAccessToken = (grant: Grant | null): RequestHandler => (req, res, next) => {
   const accessToken = bearerTokenFromHeader(req.header("authorization"));
   if (!accessToken && requiresAccessToken(req.body)) {
     res
@@ -41,7 +53,7 @@ export const requireAccessToken: RequestHandler = (req, res, next) => {
       .json(jsonRpcError(-32001, NOT_CONNECTED_MESSAGE, responseIdFor(messagesOf(req.body))));
     return;
   }
-  requestContext.run({ accessToken }, next);
+  requestContext.run({ accessToken, grant }, next);
 };
 
 export interface ScopedHandler<TArgs> {

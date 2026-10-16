@@ -3,10 +3,10 @@
  */
 
 import { getDocumentProxy } from 'unpdf';
+import { MAX_TEXT_CHARS } from './limits.js';
 
 export const SCANNED_MAX_CHARS_PER_PAGE = 50;
 export const MAX_PDF_PAGES = 500;
-export const MAX_TEXT_CHARS = 200_000;
 export const EXTRACT_TIMEOUT_MS = 10_000;
 
 export class PdfEncryptedError extends Error {

@@ -1,13 +1,14 @@
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./server.js";
+import type { Grant } from "./scopes.js";
 import { requireAccessToken } from "./auth.js";
 import { jsonRpcError, messagesOf, responseIdFor } from "./jsonrpc.js";
 import { log, errorFields } from "./log.js";
 
 export const MCP_PATH = "/mcp";
 
-export function createApp(granted: Set<string> | null) {
+export function createApp(grant: Grant | null) {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
@@ -21,8 +22,8 @@ export function createApp(granted: Set<string> | null) {
   // A fresh McpServer per request: an McpServer binds to one transport at a
   // time, so a shared one rejects overlapping requests with
   // "Already connected to a transport"
-  app.post(MCP_PATH, requireAccessToken, async (req: Request, res: Response) => {
-    const server = createServer(granted);
+  app.post(MCP_PATH, requireAccessToken(grant), async (req: Request, res: Response) => {
+    const server = createServer(grant);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
