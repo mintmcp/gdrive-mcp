@@ -68,7 +68,6 @@ const TYPE_NAMES: Record<string, string> = {
   'application/vnd.ms-powerpoint': 'PowerPoint presentation',
 };
 
-// A human name for a Drive mimeType, falling back to the mimeType itself
 export function typeName(mimeType: string): string {
   if (TYPE_NAMES[mimeType]) return TYPE_NAMES[mimeType];
   if (mimeType.startsWith('image/')) return `image (${mimeType})`;

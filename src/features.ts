@@ -8,7 +8,6 @@ import { FEATURES, SCOPES } from "./scopes.js";
 import { registerResources } from "./resources.js";
 
 export interface Feature {
-  // The Google scope the feature's calls need, checked like a tool's scope
   scope: string;
   register: (server: McpServer) => void;
 }

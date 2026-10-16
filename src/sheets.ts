@@ -43,11 +43,8 @@ export interface TabRequest {
 }
 
 export interface ReadPlan {
-  // Every grid tab, in sheet order
   grid: TabRequest[];
-  // The requested tabs, in sheet order, one values.batchGet call each
   batches: TabRequest[][];
-  // Tabs past SHEETS_MAX_VALUE_CALLS when the ranges are split by URL length
   overCalls: SheetTab[];
   nonGrid: SheetTab[];
 }
@@ -61,7 +58,6 @@ export interface SheetsContext {
 }
 
 
-// 1 → A, 26 → Z, 27 → AA, 256 → IV
 export function columnLetter(n: number): string {
   let s = '';
   for (let x = n; x > 0; x = Math.floor((x - 1) / 26)) {
@@ -82,8 +78,6 @@ function batchGetUrl(fileId: string, ranges: string[]): string {
   return `${SHEETS_API}/${encodeURIComponent(fileId)}/values:batchGet?${params}`;
 }
 
-// A whole tab, within maxCells: cols = min(columnCount,
-// SHEETS_MAX_COLUMNS_PER_TAB), rows = min(rowCount, ⌊maxCells / cols⌋)
 export function tabRequest(tab: SheetTab, maxCells: number): TabRequest {
   const cols = Math.min(tab.columnCount, SHEETS_MAX_COLUMNS_PER_TAB);
   if (cols <= 0 || tab.rowCount <= 0) return { tab, rows: 0, cols: 0, range: '' };
@@ -142,8 +136,6 @@ function csvRow(row: string[]): string {
   return row.map(csvField).join(',');
 }
 
-// Rows as placed: undefined where nothing came back. Pads each row to the
-// widest one and drops the tab's trailing empty rows
 export function normalizeRows(rows: Array<string[] | undefined>): string[][] {
   const width = rows.reduce((w, r) => Math.max(w, r?.length ?? 0), 0);
   const out = rows.map((r) => {
@@ -302,7 +294,6 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
     });
   };
 
-  // Usually one call for every tab; more only where the URL got too long
   let fallback: TabRequest[] = [];
   for (const [b, batch] of plan.batches.entries()) {
     if (ledger.spent) {
@@ -364,7 +355,6 @@ function quoteName(name: string): string {
   return `'${sliceChars(name, MAX_NOTE_NAME_CHARS)}'`;
 }
 
-// "prefix: 'a', 'b' and 3 more. suffix" within maxChars
 function nameListNote(prefix: string, names: string[], suffix: string, maxChars: number): string {
   const build = (shown: number) => {
     const list = names.slice(0, shown).join(', ');
@@ -449,7 +439,6 @@ function renderSheet(ctx: SheetsContext, nonGrid: SheetTab[], outcomes: TabOutco
       `${MAX_TEXT_CHARS}-character limit. Open the sheet for the rest: ${tabLink}`;
   }
 
-  // Notes share the reserve; each gets a slice, name lists shorten to fit
   const pending: Array<(max: number) => string> = [];
   if (cropNote) pending.push((max) => sliceChars(cropNote, max));
   if (nonGrid.length) {

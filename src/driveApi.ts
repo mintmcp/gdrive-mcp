@@ -191,8 +191,6 @@ export interface DriveResponseOptions {
   // `bytes` returns the raw body for downloads such as files.export, which
   // text decoding would corrupt. Default: JSON, or the text of a non-JSON body
   responseType?: 'json' | 'bytes';
-  // Read a 2xx body as a stream and throw ResponseTooLargeError once it passes
-  // this many bytes. Unset keeps the plain whole-body read
   maxBytes?: number;
 }
 
@@ -207,7 +205,6 @@ export function driveRequestInit(file: { id: string; resourceKey?: string }, sig
 
 export const EXPORT_LIMIT_MESSAGE = "The export is over Google's 10 MB export limit.";
 
-// files.export as bytes, or null when the file is over Google's export limit
 export async function exportFile(
   fileId: string,
   mimeType: string,

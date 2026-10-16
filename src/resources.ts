@@ -141,7 +141,6 @@ async function logFailures<T>(event: string, run: () => Promise<T>): Promise<T> 
   }
 }
 
-// What resources/read returns for a Drive type, or null for types not listed
 function resourceMimeType(driveMimeType: string): string | null {
   return readerFor(driveMimeType)?.mimeType ?? null;
 }
@@ -336,7 +335,6 @@ async function readExport(r: FileRead, exportMimeType: string): Promise<TextRead
 
 const OVER_FILE_LIMIT = `The file is over the ${MAX_FILE_SIZE / (1024 * 1024)} MB limit for reading.`;
 
-// Bytes of a file stored as-is, or null when it's over MAX_FILE_SIZE
 async function download(r: FileRead): Promise<Buffer | null> {
   if (r.size !== undefined && r.size > MAX_FILE_SIZE) return null;
   try {
@@ -431,7 +429,5 @@ export function registerResources(server: McpServer): void {
   server.server.setRequestHandler(ReadResourceRequestSchema, (request) =>
     logFailures('resource_read_error', () => readResource(request.params.uri)),
   );
-  // Nothing to template: the handler is there so a client that asks gets an
-  // empty list, not an error
   server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
 }
