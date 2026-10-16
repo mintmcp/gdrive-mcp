@@ -32,15 +32,15 @@ describe('registration', () => {
 
   it('logs the resource surface with the tool surface', () => {
     logToolSurface(resolveGrant('standard-resources'));
-    expect(records()[0]).toMatchObject({ event: 'tool_surface', features: ['resources'], resources: true });
+    expect(records()[0]).toMatchObject({ event: 'tool_surface', features: ['resources'], withheldFeatures: [] });
     logToolSurface(resolveGrant('standard'));
-    expect(records()[1]).toMatchObject({ event: 'tool_surface', features: [], resources: false });
+    expect(records()[1]).toMatchObject({ event: 'tool_surface', features: [], withheldFeatures: ['resources'] });
   });
 
   it('withholds resources when drive.readonly is not granted, whatever the feature says', () => {
     const fileOnly = { scopes: new Set(['https://www.googleapis.com/auth/drive.file']), features: new Set([FEATURES.RESOURCES]) };
     logToolSurface(fileOnly);
-    expect(records()[0]).toMatchObject({ resources: false });
+    expect(records()[0]).toMatchObject({ features: [], withheldFeatures: ['resources'] });
     expect(createServer(fileOnly).server.getCapabilities?.()).not.toHaveProperty('resources');
   });
 

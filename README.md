@@ -83,8 +83,8 @@ The server also serves MCP resources (capability `resources: {}`, no
 a profile **feature** (see [Profiles](#profiles)): only a profile that lists
 `resources` serves them, and the grant must include `drive.readonly`. Today
 that is `standard-resources` and `full`; `standard` and `labels` keep the
-surface their users connected with. The boot log's `tool_surface` line says
-`resources: true|false`.
+surface their users connected with. The boot log's `tool_surface` line lists
+the features registered and withheld.
 
 **`resources/list`** returns one page of recent files, newest first
 (`modifiedTime desc`, 50 per page, My Drive and every shared drive, trashed

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GoogleDriveTools } from "./tools.js";
-import { FEATURES, isFeatureGranted, isToolGranted, SCOPES, type Grant } from "./scopes.js";
-import { registerResources } from "./resources.js";
+import { isFeatureGranted, isToolGranted, type Grant } from "./scopes.js";
+import { FEATURE_REGISTRY } from "./features.js";
 import { log, truncate } from "./log.js";
 
 const SERVER_NAME = "Google Drive";
@@ -11,11 +11,10 @@ const SERVER_VERSION = "2.1.0";
 // each time would put that cost on every call
 const TOOLS = Object.entries(GoogleDriveTools.getTools()) as Array<[string, any]>;
 
-// Resources are a profile feature: a connector opts in, so the ones already
-// serving customers keep the surface they were connected with. They read
-// files, so drive.readonly is required as well
-export function resourcesGranted(grant: Grant | null): boolean {
-  return isFeatureGranted(FEATURES.RESOURCES, grant) && isToolGranted(SCOPES.DRIVE_READONLY, grant);
+// A feature is a profile opt-in (a connector keeps the surface its users
+// connected with) and, like a tool, needs its scope granted
+function featureGranted(name: string, grant: Grant | null): boolean {
+  return isFeatureGranted(name, grant) && isToolGranted(FEATURE_REGISTRY[name].scope, grant);
 }
 
 export function logToolSurface(grant: Grant | null): void {
@@ -24,13 +23,18 @@ export function logToolSurface(grant: Grant | null): void {
   for (const [toolName, t] of TOOLS) {
     (isToolGranted(t.handler?.scope, grant) ? registered : skipped).push(toolName);
   }
+  const features: string[] = [];
+  const withheldFeatures: string[] = [];
+  for (const name of Object.keys(FEATURE_REGISTRY)) {
+    (featureGranted(name, grant) ? features : withheldFeatures).push(name);
+  }
 
   log("info", "tool_surface", {
     scopes: grant === null ? "unrestricted" : [...grant.scopes],
     tools: registered,
     withheld: skipped,
-    features: grant === null ? "unrestricted" : [...grant.features],
-    resources: resourcesGranted(grant),
+    features,
+    withheldFeatures,
   });
 }
 
@@ -109,7 +113,9 @@ export function createServer(grant: Grant | null): McpServer {
     );
   }
 
-  if (resourcesGranted(grant)) registerResources(server);
+  for (const [name, feature] of Object.entries(FEATURE_REGISTRY)) {
+    if (featureGranted(name, grant)) feature.register(server);
+  }
 
   return server;
 }
