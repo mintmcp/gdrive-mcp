@@ -6,13 +6,17 @@ const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 4000;
 const MAX_RETRY_AFTER_MS = 30_000;     // cap server-supplied Retry-After
 
-// Thrown by makeDriveRequest's opt-in maxBytes cap, before any parsing
+// Thrown by makeDriveRequest's opt-in maxBytes cap, before any parsing.
+// bytesRead is what was pulled before giving up, so a budget across calls can
+// charge the failed one too
 export class ResponseTooLargeError extends Error {
   maxBytes: number;
-  constructor(maxBytes: number) {
+  bytesRead: number;
+  constructor(maxBytes: number, bytesRead = 0) {
     super(`The response body is over the ${maxBytes}-byte limit`);
     this.name = 'ResponseTooLargeError';
     this.maxBytes = maxBytes;
+    this.bytesRead = bytesRead;
   }
 }
 
@@ -40,7 +44,6 @@ function errorClass(err: Error): string | undefined {
   return err.name === "Error" ? undefined : err.name;
 }
 
-// status-specific hints so the LLM can self-correct
 export interface DriveErrorInfo {
   error: string;
   status?: number;
@@ -68,6 +71,7 @@ export function describeDriveError(err: unknown): DriveErrorInfo {
     message = String(err);
   }
 
+  // status-specific hints so the LLM can self-correct
   let hint: string | undefined;
   switch (status) {
     case 401:
@@ -176,7 +180,7 @@ async function readCapped(response: Response, maxBytes: number): Promise<Buffer>
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel().catch(() => {});
-      throw new ResponseTooLargeError(maxBytes);
+      throw new ResponseTooLargeError(maxBytes, total);
     }
     chunks.push(value);
   }

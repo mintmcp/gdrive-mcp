@@ -863,12 +863,11 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               return formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink)));
             }
 
-            if (size > MAX_FILE_SIZE) {
-              return formatDriveError(new Error(
-                `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
-                `Open in browser instead: ${webViewLink}.`
-              ));
-            }
+            const overSizeLimit = () => formatDriveError(new Error(
+              `File '${name}'${size ? ` is ${size} bytes which` : ''} exceeds the ${MAX_FILE_SIZE / (1024 * 1024)}MB limit. ` +
+              `Open in browser instead: ${webViewLink}.`
+            ));
+            if (size > MAX_FILE_SIZE) return overSizeLimit();
 
             let body: Buffer;
             try {
@@ -880,9 +879,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               );
             } catch (err) {
               if (!(err instanceof ResponseTooLargeError)) throw err;
-              return formatDriveError(new Error(
-                `File '${name}' exceeds the 20MB limit. Open in browser instead: ${webViewLink}.`
-              ));
+              return overSizeLimit();
             }
 
             const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };

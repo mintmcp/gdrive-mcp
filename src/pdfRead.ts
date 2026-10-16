@@ -10,13 +10,13 @@ export type PdfOutcome =
   | { outcome: 'scanned'; pages: number; textPages: number }
   | { outcome: 'text'; pdf: PdfText };
 
-// Under a caller's deadline, a failure once it has passed (or the signal has
-// aborted) is rethrown as is: the deadline is the outcome, not a parse error
+// Under a caller's deadline, a failure once it has passed is rethrown as is:
+// the deadline is the outcome, not a parse error
 export async function readPdf(
   bytes: Buffer,
-  options: ExtractOptions & { signal?: AbortSignal; deadlineAt?: number } = {},
+  options: ExtractOptions & { deadlineAt?: number } = {},
 ): Promise<PdfOutcome> {
-  const { signal, deadlineAt, ...extract } = options;
+  const { deadlineAt, ...extract } = options;
   const startedAt = Date.now();
   let pdf: PdfText;
   try {
@@ -26,7 +26,6 @@ export async function readPdf(
     const data = owned ? new Uint8Array(bytes.buffer, 0, bytes.byteLength) : new Uint8Array(bytes);
     pdf = await extractPdfText(data, extract);
   } catch (err: any) {
-    signal?.throwIfAborted();
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw err;
     log('error', 'pdf_extraction_failed', {
       ...errorFields(err),

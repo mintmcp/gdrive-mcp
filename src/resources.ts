@@ -272,7 +272,7 @@ async function readContent(
   deadlineAt: number,
 ): Promise<Content> {
   const meta = await makeDriveRequest(
-    `/files/${encodeURIComponent(file.id)}?fields=id,name,mimeType,size,webViewLink,exportLinks&supportsAllDrives=true`,
+    `/files/${encodeURIComponent(file.id)}?fields=name,mimeType,size,webViewLink&supportsAllDrives=true`,
     accessToken,
     driveRequestInit(file, signal),
   );
@@ -289,7 +289,7 @@ async function readContent(
       'unsupported_type',
     );
   }
-  const read = await reader.read({ file, accessToken, signal, deadlineAt, name, mimeType, link, size });
+  const read = await reader.read({ file, accessToken, signal, deadlineAt, name, link, size });
   if ('text' in read) return { uri, mimeType: reader.mimeType, text: read.text };
   return {
     uri,
@@ -304,7 +304,6 @@ type FileRead = {
   signal: AbortSignal;
   deadlineAt: number;
   name: string;
-  mimeType: string;
   link: string;
   size: number | undefined;
 };
@@ -369,8 +368,7 @@ async function readPdfFile(r: FileRead): Promise<TextRead> {
   const bytes = await download(r);
   if (!bytes) return { detailsOnly: OVER_FILE_LIMIT };
   const timeoutMs = Math.max(0, Math.min(EXTRACT_TIMEOUT_MS, r.deadlineAt - Date.now()));
-  const pdf = await readPdf(bytes, { timeoutMs, signal: r.signal, deadlineAt: r.deadlineAt });
-  r.signal.throwIfAborted();
+  const pdf = await readPdf(bytes, { timeoutMs, deadlineAt: r.deadlineAt });
 
   if (pdf.outcome === 'failed') {
     return { detailsOnly: `Text couldn't be extracted from this PDF because ${truncate(pdf.reason, 200)}.` };
@@ -390,23 +388,13 @@ async function readPdfFile(r: FileRead): Promise<TextRead> {
   return { text: capText(pdf.pdf.text, r.link, { notes, truncated: pdf.pdf.truncated }) };
 }
 
-async function readFolder(r: FileRead): Promise<TextRead> {
-  return { text: await folderListing(r.file, r.accessToken, init(r), r.name, r.link) };
-}
-
 function escapeLinkText(name: string): string {
   return name.replace(/[\\[\]]/g, (c) => `\\${c}`).replace(/[\r\n]+/g, ' ');
 }
 
-async function folderListing(
-  folder: DriveUri,
-  accessToken: string,
-  init: RequestInit,
-  name: string,
-  link: string,
-): Promise<string> {
+async function readFolder(r: FileRead): Promise<TextRead> {
   const params = new URLSearchParams({
-    q: `'${folder.id}' in parents and trashed = false`,
+    q: `'${r.file.id}' in parents and trashed = false`,
     corpora: 'allDrives',
     supportsAllDrives: 'true',
     includeItemsFromAllDrives: 'true',
@@ -414,11 +402,11 @@ async function folderListing(
     pageSize: String(FOLDER_LISTING_PAGE_SIZE),
     fields: 'nextPageToken,files(id,name,mimeType,webViewLink)',
   });
-  const data = await makeDriveRequest(`/files?${params}`, accessToken, init);
+  const data = await makeDriveRequest(`/files?${params}`, r.accessToken, init(r));
   const children: any[] = Array.isArray(data?.files) ? data.files : [];
 
   const lines = [
-    `# ${name}`,
+    `# ${r.name}`,
     '',
     'Folder listing: direct children only, their contents are not included.',
     '',
@@ -430,9 +418,9 @@ async function folderListing(
   ];
   if (!children.length) lines.push('This folder is empty.');
   const more = data?.nextPageToken
-    ? [`More items are in this folder than are listed here. Open the folder to see them all: ${link}`]
+    ? [`More items are in this folder than are listed here. Open the folder to see them all: ${r.link}`]
     : [];
-  return capText(lines.join('\n'), link, { notes: more });
+  return { text: capText(lines.join('\n'), r.link, { notes: more }) };
 }
 
 export function registerResources(server: McpServer): void {

@@ -31,7 +31,7 @@ describe('resources/read', () => {
     const exp = calls.find((c) => c.url.includes('/export?'))!;
     expect(new URL(exp.url).searchParams.get('mimeType')).toBe('text/markdown');
     const m = new URL(calls.find((c) => isMeta(c.url))!.url);
-    expect(m.searchParams.get('fields')).toBe('id,name,mimeType,size,webViewLink,exportLinks');
+    expect(m.searchParams.get('fields')).toBe('name,mimeType,size,webViewLink');
     expect(m.searchParams.get('supportsAllDrives')).toBe('true');
   });
 

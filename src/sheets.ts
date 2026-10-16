@@ -248,11 +248,18 @@ async function readThroughSheetsApi(ctx: SheetsContext): Promise<TextRead> {
   const init = requestInit(ctx);
   let used = 0;
 
-  // A Sheets call's body, streamed under the per-call and per-read byte caps
+  // A Sheets call's body, streamed under the per-call and per-read byte caps.
+  // A call over its cap still pulled bytes, charged to the read as well
   const fetchJson = async (url: string): Promise<any> => {
     const cap = Math.min(SHEETS_MAX_BYTES_PER_CALL, SHEETS_MAX_BYTES_PER_READ - used);
     if (cap <= 0) throw new ResponseTooLargeError(0);
-    const body: Buffer = await makeDriveRequest(url, ctx.accessToken, init, { responseType: 'bytes', maxBytes: cap });
+    let body: Buffer;
+    try {
+      body = await makeDriveRequest(url, ctx.accessToken, init, { responseType: 'bytes', maxBytes: cap });
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) used += err.bytesRead;
+      throw err;
+    }
     used += body.length;
     return JSON.parse(body.toString('utf8'));
   };

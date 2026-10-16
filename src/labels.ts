@@ -124,7 +124,9 @@ export async function getFileLabels(
     }
   } catch (err: any) {
     error = 'label read failed';
-    log("warn", "label_read_failed", errorFields(err));
+    // The caller aborting the read (its deadline, or a content error that
+    // ended it) is not a label failure worth a log line
+    if (!options.signal?.aborted) log("warn", "label_read_failed", errorFields(err));
   }
 
   const withIds = wire.filter((l): l is WireLabel & { id: string } => {
@@ -143,7 +145,7 @@ export async function getFileLabels(
     const info = lookup.status === 'fulfilled' ? lookup.value : undefined;
     if (!info) {
       if (!error) error = 'incomplete label resolution';
-      log("warn", "label_lookup_failed", errorFields((lookup as PromiseRejectedResult).reason));
+      if (!options.signal?.aborted) log("warn", "label_lookup_failed", errorFields((lookup as PromiseRejectedResult).reason));
     }
 
     const values: AppliedLabelValue[] = [];

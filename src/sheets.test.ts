@@ -518,7 +518,10 @@ describe('readSheet', () => {
       const fake = fakeSheets(tabs, { stream: true });
       const text = await readText();
 
-      expect(fake.batchUrls()).toHaveLength(SHEETS_MAX_VALUE_CALLS);
+      expect(fake.batchUrls().length).toBeLessThanOrEqual(SHEETS_MAX_VALUE_CALLS);
+      // Every byte pulled counts, the calls over the cap included: at most the
+      // per-read cap, the chunk that crossed it and what the stream read ahead
+      expect(fake.stats.pulled).toBeLessThanOrEqual(SHEETS_MAX_BYTES_PER_READ + 3 * 64 * 1024);
       const rendered = tabs.filter((t) => text.includes(`# ${t.title}\n`));
       expect(rendered.length * heavy(share)).toBeLessThanOrEqual(SHEETS_MAX_BYTES_PER_READ);
       expect(rendered.map((t) => t.title)).toEqual(tabs.slice(0, rendered.length).map((t) => t.title));
