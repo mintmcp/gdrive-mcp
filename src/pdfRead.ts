@@ -17,6 +17,8 @@ export async function readPdf(
   options: ExtractOptions & { deadlineAt?: number } = {},
 ): Promise<PdfOutcome> {
   const { deadlineAt, ...extract } = options;
+  // read before extraction: the parser can detach the buffer
+  const byteLength = bytes.byteLength;
   const startedAt = Date.now();
   let pdf: PdfText;
   try {
@@ -29,7 +31,7 @@ export async function readPdf(
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw err;
     log('error', 'pdf_extraction_failed', {
       ...errorFields(err),
-      bytes: bytes.byteLength,
+      bytes: byteLength,
       elapsedMs: Date.now() - startedAt,
     });
     return { outcome: 'failed', reason: err?.message || 'the PDF could not be parsed' };

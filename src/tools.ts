@@ -8,7 +8,7 @@ import { withGoogleAuth as requirePermissionSecure } from "./auth.js";
 import { readPdf } from './pdfRead.js';
 import { classifyMime } from './mime.js';
 import { MAX_FILE_SIZE, MAX_TEXT_CHARS } from './limits.js';
-import { DriveApiError, ResponseTooLargeError, formatDriveError, makeDriveRequest } from './driveApi.js';
+import { DriveApiError, formatDriveError, makeDriveRequest, GOOGLE_DRIVE_API } from './driveApi.js';
 import { fetchLabelsMeta } from './labels.js';
 import { resolveExportFormat, exportKind } from './exportFormats.js';
 
@@ -863,23 +863,24 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               return formatDriveError(new Error(unsupportedMessage(name, mimeType, webViewLink)));
             }
 
-            const overSizeLimit = () => formatDriveError(new Error(
-              `File '${name}'${size ? ` is ${size} bytes which` : ''} exceeds the ${MAX_FILE_SIZE / (1024 * 1024)}MB limit. ` +
-              `Open in browser instead: ${webViewLink}.`
-            ));
-            if (size > MAX_FILE_SIZE) return overSizeLimit();
+            if (size > MAX_FILE_SIZE) {
+              return formatDriveError(new Error(
+                `File '${name}' is ${size} bytes which exceeds the 20MB limit. ` +
+                `Open in browser instead: ${webViewLink}.`
+              ));
+            }
 
-            let body: Buffer;
-            try {
-              body = await makeDriveRequest(
-                `/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`,
-                accessToken,
-                {},
-                { responseType: 'bytes', maxBytes: MAX_FILE_SIZE },
+            const downloadUrl = `${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file_id)}?alt=media&supportsAllDrives=true`;
+            const response = await fetch(downloadUrl, {
+              headers: { 'Authorization': `Bearer ${accessToken}` },
+            });
+
+            if (!response.ok) {
+              const bodyText = await response.text().catch(() => '');
+              throw new DriveApiError(
+                `Failed to download file content${bodyText ? `: ${bodyText}` : ''} (${response.status})`,
+                response.status,
               );
-            } catch (err) {
-              if (!(err instanceof ResponseTooLargeError)) throw err;
-              return overSizeLimit();
             }
 
             const fileMeta = { id: meta.id, name, mimeType, size, webViewLink };
@@ -889,7 +890,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             });
 
             if (kind === 'pdf') {
-              const pdf = await readPdf(body);
+              const pdf = await readPdf(Buffer.from(await response.arrayBuffer()));
               let result: Record<string, unknown>;
               if (pdf.outcome === 'failed') {
                 result = {
@@ -939,18 +940,23 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             }
 
             if (kind === 'image') {
+              const arrayBuffer = await response.arrayBuffer();
+              // Node ≥22 is declared in package.json; Buffer is safe and avoids
+              // the O(n²) String.fromCharCode chunking required by btoa.
+              const base64Data = Buffer.from(arrayBuffer).toString('base64');
               const imageMeta = { ...fileMeta, extraction: 'image' as const };
               return {
                 content: [
                   jsonBlock(imageMeta),
-                  { type: 'image' as const, data: body.toString('base64'), mimeType },
+                  { type: 'image' as const, data: base64Data, mimeType },
                 ],
                 structuredContent: imageMeta,
               };
             }
 
             // kind === 'text'
-            const result = { ...fileMeta, extraction: 'text' as const, content: body.toString('utf8') };
+            const textContent = await response.text();
+            const result = { ...fileMeta, extraction: 'text' as const, content: textContent };
             return {
               content: [jsonBlock(result)],
               structuredContent: result,
