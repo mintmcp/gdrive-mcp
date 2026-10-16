@@ -18,7 +18,7 @@ import {
   TEXT_NOTES_RESERVE_CHARS,
 } from './limits.js';
 
-export const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
 const TAB_FIELDS = 'sheets.properties(sheetId,title,index,sheetType,hidden,gridProperties(rowCount,columnCount))';
 
@@ -74,7 +74,7 @@ export function a1Range(title: string, r1: number, r2: number, cols: number): st
   return `'${title.replace(/'/g, "''")}'!A${r1}:${columnLetter(cols)}${r2}`;
 }
 
-export function batchGetUrl(fileId: string, ranges: string[]): string {
+function batchGetUrl(fileId: string, ranges: string[]): string {
   const params = new URLSearchParams();
   for (const range of ranges) params.append('ranges', range);
   params.set('valueRenderOption', 'FORMATTED_VALUE');
@@ -138,7 +138,7 @@ export function csvField(value: string): string {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-export function csvRow(row: string[]): string {
+function csvRow(row: string[]): string {
   return row.map(csvField).join(',');
 }
 
@@ -224,7 +224,7 @@ class CellLedger {
 const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
 
 // D19: a Sheets API refusal that a keyed link's Drive export may get past
-export function isKeyedFallbackError(err: unknown): boolean {
+function isKeyedFallbackError(err: unknown): boolean {
   if (!(err instanceof DriveApiError)) return false;
   if (err.status === 404) return true;
   return err.status === 403 && !RATE_LIMIT_REASONS.has(err.reason ?? '');

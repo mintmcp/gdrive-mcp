@@ -30,7 +30,7 @@ export type AppliedLabel = {
 // Optional, for resources/read (R3): the link's resource key goes on every
 // files.listLabels page, and the read's deadline signal on every label call.
 // Omitted, the calls are exactly what get_file and get_file_metadata make
-export type LabelReadOptions = {
+type LabelReadOptions = {
   resourceKey?: string | undefined;
   signal?: AbortSignal | undefined;
 };

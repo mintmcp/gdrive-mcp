@@ -43,7 +43,7 @@ import {
 } from './limits.js';
 
 // MCP's "resource not found"
-export const RESOURCE_NOT_FOUND = -32002;
+const RESOURCE_NOT_FOUND = -32002;
 
 const FOLDER = 'application/vnd.google-apps.folder';
 const DOC = 'application/vnd.google-apps.document';
@@ -142,7 +142,7 @@ async function logFailures<T>(event: string, run: () => Promise<T>): Promise<T> 
 }
 
 // What resources/read returns for a Drive type, or null for types not listed
-export function resourceMimeType(driveMimeType: string): string | null {
+function resourceMimeType(driveMimeType: string): string | null {
   return readerFor(driveMimeType)?.mimeType ?? null;
 }
 

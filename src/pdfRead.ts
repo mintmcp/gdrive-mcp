@@ -17,13 +17,13 @@ export async function readPdf(
   options: ExtractOptions & { deadlineAt?: number } = {},
 ): Promise<PdfOutcome> {
   const { deadlineAt, ...extract } = options;
-  // read before extraction: the parser can detach the buffer
+  // The parser can detach the buffer it gets: read the length first, and hand
+  // it a view only when the Buffer owns its whole ArrayBuffer (never a slice
+  // of Node's shared pool)
   const byteLength = bytes.byteLength;
   const startedAt = Date.now();
   let pdf: PdfText;
   try {
-    // The parser can detach the buffer it gets: hand it a view only when the
-    // Buffer owns its whole ArrayBuffer (never a slice of Node's shared pool)
     const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
     const data = owned ? new Uint8Array(bytes.buffer, 0, bytes.byteLength) : new Uint8Array(bytes);
     pdf = await extractPdfText(data, extract);

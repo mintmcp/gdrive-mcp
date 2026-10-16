@@ -151,9 +151,10 @@ anything else, with the same message and hint as the tools (a 401 says to
 reconnect Google). Failures are logged as `resource_list_error` /
 `resource_read_error` with `status`, `reason` and `code` only.
 
-On label-scoped deployments (`labels`, `full`), every successful read
-(including the short notes and folder listings) carries the same top-level
-`_meta` labels as `get_file`: `{ applied, labelsError? }`. `resources/list`
+On a profile with both the `resources` feature and the labels scope (today
+`full`), every successful read (including the short notes and folder
+listings) carries the same top-level `_meta` labels as `get_file`:
+`{ applied, labelsError? }`. `resources/list`
 does no label check, like `search_files`. The Google Drive folder allowlist
 middleware doesn't cover resources: the list can show files outside the
 allowed folders.
