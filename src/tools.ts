@@ -1150,7 +1150,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       share_file: {
-        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only). role="owner" transfers ownership of the item to the user, which the caller cannot undo. Calling it again for someone who already has access can raise their role but not lower it; use update_permission to lower or remove access.',
+        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only). role="owner" transfers ownership of the item to the user, which the caller cannot undo; set move_to_new_owners_root=true when the previous owner will then remove their own access. Calling it again for someone who already has access can raise their role but not lower it; use update_permission to lower or remove access.',
         outputSchema: {
           permissionId: z.string().optional(),
           fileId: z.string(),
@@ -1171,8 +1171,12 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             .optional()
             .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify. Ignored for type="anyone" and type="domain".'),
           message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
+          move_to_new_owners_root: z
+            .boolean()
+            .optional()
+            .describe('Only with role="owner". If true, moves the item into the new owner\'s My Drive and out of its current folders, so the previous owner keeps only a direct writer permission they can remove with update_permission. Leave unset to keep the item in its current folders, for example a shared team folder whose members would otherwise lose access.'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message, move_to_new_owners_root }: any, context: any) => {
           const { accessToken } = context;
 
           try {
@@ -1186,6 +1190,9 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             if (role === 'owner' && type !== 'user') {
               return formatDriveError(new Error('role="owner" is only valid when type="user".'));
+            }
+            if (move_to_new_owners_root === true && role !== 'owner') {
+              return formatDriveError(new Error('move_to_new_owners_root is only valid when role="owner".'));
             }
 
             // Per-type required/forbidden field validation.
@@ -1223,6 +1230,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             });
             if (notify && message) params.set('emailMessage', message);
             if (role === 'owner') params.set('transferOwnership', 'true');
+            if (move_to_new_owners_root === true) params.set('moveToNewOwnersRoot', 'true');
 
             const result = await makeDriveRequest(
               `/files/${encodeURIComponent(file_id)}/permissions?${params}`,

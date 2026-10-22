@@ -85,7 +85,7 @@ export function describeDriveError(err: unknown): DriveErrorInfo {
         : reason === 'consentRequiredForOwnershipTransfer'
         ? 'Google only transfers ownership directly between accounts in the same Workspace organization. For any other account the new owner has to accept the transfer, which this server cannot do.'
         : reason === 'cannotDeletePermission'
-        ? 'Drive does not allow removing this permission. The owner\'s permission cannot be removed until ownership is transferred, and a permission inherited from a parent folder has to be removed on that folder.'
+        ? 'Drive does not allow removing this permission. The owner\'s permission cannot be removed until ownership is transferred, and a permission inherited from a parent folder has to be removed on that folder. After an ownership transfer the item stays in the previous owner\'s folder unless it was moved to the new owner\'s My Drive.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:

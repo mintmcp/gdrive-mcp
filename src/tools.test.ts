@@ -624,6 +624,23 @@ describe('share_file handler ownership transfer', () => {
     expect(res.structuredContent.message).toContain('transferred to new@example.com');
   });
 
+  it('moves the item to the new owner\'s My Drive only when asked', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'new@example.com' })]]);
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com', move_to_new_owners_root: true });
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com' });
+    expect(new URL(calls[0].url).searchParams.get('moveToNewOwnersRoot')).toBe('true');
+    expect(new URL(calls[1].url).searchParams.has('moveToNewOwnersRoot')).toBe(false);
+  });
+
+  it('rejects move_to_new_owners_root without role="owner"', async () => {
+    const calls = stubFetch([]);
+    const res = await shareFile({ type: 'user', role: 'writer', email: 'new@example.com', move_to_new_owners_root: true });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toContain('only valid when role="owner"');
+    expect(calls).toHaveLength(0);
+  });
+
   it('does not ask for an ownership transfer for other roles', async () => {
     const calls = stubFetch([['/files/f1/permissions', () =>
       jsonResponse({ id: 'p1', type: 'user', role: 'writer', emailAddress: 'new@example.com' })]]);
