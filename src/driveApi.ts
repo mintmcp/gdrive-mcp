@@ -82,6 +82,10 @@ export function describeDriveError(err: unknown): DriveErrorInfo {
         ? 'Rate limited by Google. Retried already — back off and try again later.'
         : reason === 'exportSizeLimitExceeded'
         ? 'The export is over Google\'s 10MB export limit. Try a lighter format (for a Doc, md or txt instead of pdf or docx), or open the file directly.'
+        : reason === 'consentRequiredForOwnershipTransfer'
+        ? 'Google only transfers ownership directly between accounts in the same Workspace organization. For any other account the new owner has to accept the transfer, which this server cannot do.'
+        : reason === 'cannotDeletePermission'
+        ? 'Drive does not allow removing this permission. The owner\'s permission cannot be removed until ownership is transferred, and a permission inherited from a parent folder has to be removed on that folder.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:
