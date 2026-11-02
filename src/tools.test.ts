@@ -641,6 +641,17 @@ describe('share_file handler ownership transfer', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('sends the message with an ownership transfer even without send_notification', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'new@example.com' })]]);
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com', message: 'All yours' });
+    expect(new URL(calls[0].url).searchParams.get('emailMessage')).toBe('All yours');
+  });
+
+  it('is advertised as destructive, since a transfer cannot be undone by the caller', () => {
+    expect((GoogleDriveTools.getTools() as any).share_file.destructiveHint).toBe(true);
+  });
+
   it('does not ask for an ownership transfer for other roles', async () => {
     const calls = stubFetch([['/files/f1/permissions', () =>
       jsonResponse({ id: 'p1', type: 'user', role: 'writer', emailAddress: 'new@example.com' })]]);
@@ -692,6 +703,10 @@ describe('update_permission handler', () => {
     expect(calls[0].init?.method).toBe('DELETE');
     expect(new URL(calls[0].url).searchParams.get('supportsAllDrives')).toBe('true');
     expect(res.structuredContent).toEqual({ fileId: 'f1', permissionId: 'p1', role: 'none', message: 'Permission p1 revoked' });
+  });
+
+  it('is advertised as destructive, since role "none" removes access', () => {
+    expect((GoogleDriveTools.getTools() as any).update_permission.destructiveHint).toBe(true);
   });
 
   it('returns Drive\'s refusal as an error envelope', async () => {

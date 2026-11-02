@@ -83,9 +83,9 @@ export function describeDriveError(err: unknown): DriveErrorInfo {
         : reason === 'exportSizeLimitExceeded'
         ? 'The export is over Google\'s 10MB export limit. Try a lighter format (for a Doc, md or txt instead of pdf or docx), or open the file directly.'
         : reason === 'consentRequiredForOwnershipTransfer'
-        ? 'Google only transfers ownership directly between accounts in the same Workspace organization. For any other account the new owner has to accept the transfer, which this server cannot do.'
+        ? 'Drive requires the new owner to accept this transfer, as it does between personal Google accounts. This server cannot send or accept a pending transfer; direct transfers work between accounts in the same Workspace organization.'
         : reason === 'cannotDeletePermission'
-        ? 'Drive does not allow removing this permission. The owner\'s permission cannot be removed until ownership is transferred, and a permission inherited from a parent folder has to be removed on that folder. After an ownership transfer the item stays in the previous owner\'s folder unless it was moved to the new owner\'s My Drive.'
+        ? 'Drive does not allow removing this permission. The owner\'s permission cannot be removed until ownership is transferred, and a permission inherited from a parent folder has to be removed on that folder. After an ownership transfer, the previous owner\'s access is inherited from their own folder unless the transfer moved the item to the new owner\'s My Drive.'
         : 'Permission denied. The user may not have access to this file, the file may be in a shared drive without permission, or the required Drive scope was not granted.';
       break;
     case 404:

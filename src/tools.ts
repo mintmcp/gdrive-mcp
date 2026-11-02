@@ -1150,6 +1150,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       share_file: {
+        destructiveHint: true,
         description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only). role="owner" transfers ownership of the item to the user, which the caller cannot undo; set move_to_new_owners_root=true when the previous owner will then remove their own access. Calling it again for someone who already has access can raise their role but not lower it; use update_permission to lower or remove access.',
         outputSchema: {
           permissionId: z.string().optional(),
@@ -1170,7 +1171,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             .boolean()
             .optional()
             .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify. Ignored for type="anyone" and type="domain".'),
-          message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
+          message: z.string().optional().describe('Optional message included in the notification email. Used when send_notification=true, and always with role="owner", since Google emails the new owner of every transfer.'),
           move_to_new_owners_root: z
             .boolean()
             .optional()
@@ -1434,36 +1435,32 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
           const endpoint = `/files/${encodeURIComponent(file_id)}/permissions/${encodeURIComponent(permission_id)}`;
 
           try {
+            let output;
             if (role === 'none') {
               await makeDriveRequest(`${endpoint}?supportsAllDrives=true`, accessToken, { method: 'DELETE' });
-              const output = {
+              output = {
                 fileId: file_id,
                 permissionId: permission_id,
                 role: 'none',
                 message: `Permission ${permission_id} revoked`,
               };
-              return {
-                content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
-                structuredContent: output,
+            } else {
+              const result = await makeDriveRequest(
+                `${endpoint}?fields=id,role&supportsAllDrives=true`,
+                accessToken,
+                {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ role }),
+                },
+              );
+              output = {
+                fileId: file_id,
+                permissionId: result.id,
+                role: result.role,
+                message: `Permission ${result.id} is now ${result.role}`,
               };
             }
-
-            const result = await makeDriveRequest(
-              `${endpoint}?fields=id,role&supportsAllDrives=true`,
-              accessToken,
-              {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ role }),
-              },
-            );
-
-            const output = {
-              fileId: file_id,
-              permissionId: result.id,
-              role: result.role,
-              message: `Permission ${result.id} is now ${result.role}`,
-            };
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
               structuredContent: output,

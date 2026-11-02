@@ -66,7 +66,7 @@ describe('formatDriveError', () => {
   });
   it('explains a refused ownership transfer instead of calling it a permission problem', () => {
     const e = formatDriveError(new DriveApiError('consent required', 403, 'consentRequiredForOwnershipTransfer'));
-    expect(payloadOf(e).hint).toContain('same Workspace organization');
+    expect(payloadOf(e).hint).toContain('requires the new owner to accept');
   });
   it('explains a permission Drive will not delete', () => {
     const e = formatDriveError(new DriveApiError('cannot delete', 403, 'cannotDeletePermission'));
