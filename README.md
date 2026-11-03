@@ -41,7 +41,8 @@ the Sheets API enabled. No extra scope.
 |                 | `get_file_metadata`    | Full metadata for any file/folder; no download.            |
 |                 | `get_file_permissions` | Lists who has access and at what role.                     |
 | Move / share    | `move_file`            | True move; removes the item from its previous parents.     |
-|                 | `share_file`           | user / domain / anyone permissions; no email by default.   |
+|                 | `share_file`           | user / domain / anyone permissions; no email by default. `role: "owner"` transfers ownership. |
+|                 | `update_permission`    | Changes a permission's role up or down, or removes it with `role: "none"`. |
 |                 | `update_file_metadata` | Rename / set description / star; metadata only.            |
 |                 | `trash_file`           | Reversible move to trash (not a permanent delete).         |
 | Create / copy   | `create_folder`        | Optional `parent_folder_id` for nesting.                   |
@@ -183,7 +184,7 @@ Each tool declares the Google scope it needs (the first argument to
 | Scope                   | Tools                                                   |
 |-------------------------|---------------------------------------------------------|
 | `drive.readonly`        | `search_files`, `list_recent_files`, `get_file`, `export_file`, `get_file_metadata`, `get_file_permissions`, and the [resources](#resources) (with the `resources` feature) |
-| `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_file_metadata`, `trash_file`, `upload_file` |
+| `drive.file`            | `copy_file`, `create_folder`, `move_file`, `share_file`, `update_permission`, `update_file_metadata`, `trash_file`, `upload_file` |
 | `drive.labels.readonly` | `get_file` and `resources/read` label enrichment (`_meta`), no tool of its own |
 
 Each deployment selects a profile via the `PROFILE` env var. At startup the

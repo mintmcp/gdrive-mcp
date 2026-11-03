@@ -102,6 +102,7 @@ const ALL_TOOLS = [
   "share_file",
   "trash_file",
   "update_file_metadata",
+  "update_permission",
   "upload_file",
 ].sort();
 

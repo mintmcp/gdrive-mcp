@@ -605,6 +605,120 @@ describe('copy_file handler', () => {
   });
 });
 
+describe('share_file handler ownership transfer', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const shareFile = (args: Record<string, unknown>) =>
+    requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
+      (GoogleDriveTools.getTools() as any).share_file.handler({ file_id: 'f1', ...args }));
+
+  it('transfers ownership with the notification Drive requires', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'new@example.com' })]]);
+    const res = await shareFile({ type: 'user', role: 'owner', email: 'new@example.com' });
+    expect(res.isError).toBeUndefined();
+    const params = new URL(calls[0].url).searchParams;
+    expect(params.get('transferOwnership')).toBe('true');
+    expect(params.get('sendNotificationEmail')).toBe('true');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ type: 'user', role: 'owner', emailAddress: 'new@example.com' });
+    expect(res.structuredContent.message).toContain('transferred to new@example.com');
+  });
+
+  it('moves the item to the new owner\'s My Drive only when asked', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'new@example.com' })]]);
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com', move_to_new_owners_root: true });
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com' });
+    expect(new URL(calls[0].url).searchParams.get('moveToNewOwnersRoot')).toBe('true');
+    expect(new URL(calls[1].url).searchParams.has('moveToNewOwnersRoot')).toBe(false);
+  });
+
+  it('rejects move_to_new_owners_root without role="owner"', async () => {
+    const calls = stubFetch([]);
+    const res = await shareFile({ type: 'user', role: 'writer', email: 'new@example.com', move_to_new_owners_root: true });
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toContain('only valid when role="owner"');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('sends the message with an ownership transfer even without send_notification', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'owner', emailAddress: 'new@example.com' })]]);
+    await shareFile({ type: 'user', role: 'owner', email: 'new@example.com', message: 'All yours' });
+    expect(new URL(calls[0].url).searchParams.get('emailMessage')).toBe('All yours');
+  });
+
+  it('is advertised as destructive, since a transfer cannot be undone by the caller', () => {
+    expect((GoogleDriveTools.getTools() as any).share_file.destructiveHint).toBe(true);
+  });
+
+  it('does not ask for an ownership transfer for other roles', async () => {
+    const calls = stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'writer', emailAddress: 'new@example.com' })]]);
+    await shareFile({ type: 'user', role: 'writer', email: 'new@example.com' });
+    expect(new URL(calls[0].url).searchParams.has('transferOwnership')).toBe(false);
+  });
+
+  it('reports the role Drive kept when it ignores a downgrade', async () => {
+    stubFetch([['/files/f1/permissions', () =>
+      jsonResponse({ id: 'p1', type: 'user', role: 'commenter', emailAddress: 'new@example.com' })]]);
+    const res = await shareFile({ type: 'user', role: 'reader', email: 'new@example.com' });
+    expect(res.structuredContent.role).toBe('commenter');
+    expect(res.structuredContent.message).toContain('as commenter');
+    expect(res.structuredContent.message).toContain('use update_permission to lower it');
+  });
+
+  it('rejects role="owner" for anyone and domain without calling Drive', async () => {
+    const calls = stubFetch([]);
+    for (const args of [{ type: 'anyone' }, { type: 'domain', domain: 'example.com' }]) {
+      const res = await shareFile({ role: 'owner', ...args });
+      expect(res.isError).toBe(true);
+      expect(JSON.parse(res.content[0].text).error).toContain('role="owner" is only valid when type="user"');
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('update_permission handler', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const updatePermission = (role: string) =>
+    requestContext.run({ accessToken: 'tok', grant: resolveGrant() }, () =>
+      (GoogleDriveTools.getTools() as any).update_permission.handler({ file_id: 'f1', permission_id: 'p1', role }));
+
+  it('lowers a role with a PATCH and reports the role Drive returned', async () => {
+    const calls = stubFetch([['/files/f1/permissions/p1', () => jsonResponse({ id: 'p1', role: 'reader' })]]);
+    const res = await updatePermission('reader');
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].init?.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ role: 'reader' });
+    expect(new URL(calls[0].url).searchParams.get('supportsAllDrives')).toBe('true');
+    expect(res.structuredContent).toEqual({ fileId: 'f1', permissionId: 'p1', role: 'reader', message: 'Permission p1 is now reader' });
+  });
+
+  it('revokes with role "none" and accepts Drive\'s empty 204', async () => {
+    const calls = stubFetch([['/files/f1/permissions/p1', () => new Response(null, { status: 204 })]]);
+    const res = await updatePermission('none');
+    expect(res.isError).toBeUndefined();
+    expect(calls[0].init?.method).toBe('DELETE');
+    expect(new URL(calls[0].url).searchParams.get('supportsAllDrives')).toBe('true');
+    expect(res.structuredContent).toEqual({ fileId: 'f1', permissionId: 'p1', role: 'none', message: 'Permission p1 revoked' });
+  });
+
+  it('is advertised as destructive, since role "none" removes access', () => {
+    expect((GoogleDriveTools.getTools() as any).update_permission.destructiveHint).toBe(true);
+  });
+
+  it('returns Drive\'s refusal as an error envelope', async () => {
+    stubFetch([['/files/f1/permissions/p1', () => jsonResponse({
+      error: { code: 403, message: 'The authenticated user cannot delete the permission.', errors: [{ reason: 'cannotDeletePermission' }] },
+    }, 403)]]);
+    const res = await updatePermission('none');
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text)).toMatchObject({ status: 403, reason: 'cannotDeletePermission' });
+  });
+});
+
 const DOC_EXPORT_LINKS = {
   'text/markdown': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=md',
   'application/pdf': 'https://docs.google.com/feeds/download/documents/export/Export?id=d1&exportFormat=pdf',

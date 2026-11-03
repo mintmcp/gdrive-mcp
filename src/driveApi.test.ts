@@ -64,6 +64,14 @@ describe('formatDriveError', () => {
     const e = formatDriveError(new DriveApiError('too many', 429));
     expect(payloadOf(e).hint).toMatch(/Retried/i);
   });
+  it('explains a refused ownership transfer instead of calling it a permission problem', () => {
+    const e = formatDriveError(new DriveApiError('consent required', 403, 'consentRequiredForOwnershipTransfer'));
+    expect(payloadOf(e).hint).toContain('requires the new owner to accept');
+  });
+  it('explains a permission Drive will not delete', () => {
+    const e = formatDriveError(new DriveApiError('cannot delete', 403, 'cannotDeletePermission'));
+    expect(payloadOf(e).hint).toContain('owner\'s permission cannot be removed');
+  });
   it('preserves message for plain Error without status', () => {
     const e = formatDriveError(new Error('boom'));
     expect(payloadOf(e).error).toBe('boom');

@@ -1150,7 +1150,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       share_file: {
-        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only).',
+        destructiveHint: true,
+        description: 'Grant access to a Google Drive file or folder by creating a permission. Supports sharing with a specific user (by email), an entire Google Workspace domain (by domain name), or making the item accessible to anyone with the link. By default no email notification is sent — the caller must explicitly set send_notification=true to email the recipient (user type only). role="owner" transfers ownership of the item to the user, which the caller cannot undo; set move_to_new_owners_root=true when the previous owner will then remove their own access. Calling it again for someone who already has access can raise their role but not lower it; use update_permission to lower or remove access.',
         outputSchema: {
           permissionId: z.string().optional(),
           fileId: z.string(),
@@ -1163,16 +1164,20 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
         schema: {
           file_id: z.string().describe('ID of the file or folder to share.'),
           type: z.enum(['user', 'anyone', 'domain']).describe('"user" to share with a specific email; "domain" to share with everyone in a Google Workspace domain; "anyone" for link-sharing with the public.'),
-          role: z.enum(['reader', 'commenter', 'writer']).describe('Access level to grant. "reader" = view, "commenter" = view+comment, "writer" = edit.'),
+          role: z.enum(['reader', 'commenter', 'writer', 'owner']).describe('Access level to grant. "reader" = view, "commenter" = view+comment, "writer" = edit, "owner" = transfer ownership (type="user" only; cannot be undone by the caller, the previous owner becomes a writer, and Google always emails the new owner).'),
           email: z.string().email().optional().describe('Required when type="user": the recipient email address.'),
           domain: z.string().optional().describe('Required when type="domain": the Workspace domain (e.g. "example.com"). The signed-in user must be a member of this domain or have permission to share with it.'),
           send_notification: z
             .boolean()
             .optional()
             .describe('If true and type="user", Google emails the recipient. Defaults to false to avoid accidental notifications — set true only when the user explicitly asked to notify. Ignored for type="anyone" and type="domain".'),
-          message: z.string().optional().describe('Optional message included in the notification email (only used when send_notification=true).'),
+          message: z.string().optional().describe('Optional message included in the notification email. Used when send_notification=true, and always with role="owner", since Google emails the new owner of every transfer.'),
+          move_to_new_owners_root: z
+            .boolean()
+            .optional()
+            .describe('Only with role="owner". If true, moves the item into the new owner\'s My Drive and out of its current folders, so the previous owner keeps only a direct writer permission they can remove with update_permission. Leave unset to keep the item in its current folders, for example a shared team folder whose members would otherwise lose access.'),
         },
-        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message }: any, context: any) => {
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, type, role, email, domain, send_notification, message, move_to_new_owners_root }: any, context: any) => {
           const { accessToken } = context;
 
           try {
@@ -1183,6 +1188,13 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             // the full string-shape validation via validateWorkspaceDomain.
             const domainPresent = typeof domain === 'string' ? domain.trim().length > 0 : !!domain;
             let normalisedDomain = '';
+
+            if (role === 'owner' && type !== 'user') {
+              return formatDriveError(new Error('role="owner" is only valid when type="user".'));
+            }
+            if (move_to_new_owners_root === true && role !== 'owner') {
+              return formatDriveError(new Error('move_to_new_owners_root is only valid when role="owner".'));
+            }
 
             // Per-type required/forbidden field validation.
             if (type === 'user') {
@@ -1206,7 +1218,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
 
             // Drive only accepts sendNotificationEmail=true for type=user;
             // force false for the others to avoid 400s from the API.
-            const notify = type === 'user' && send_notification === true;
+            // Ownership transfers are the reverse: Drive rejects them unless notified.
+            const notify = role === 'owner' || (type === 'user' && send_notification === true);
             const body: any = { type, role };
             if (type === 'user') body.emailAddress = email;
             if (type === 'domain') body.domain = normalisedDomain;
@@ -1217,6 +1230,8 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               sendNotificationEmail: notify ? 'true' : 'false',
             });
             if (notify && message) params.set('emailMessage', message);
+            if (role === 'owner') params.set('transferOwnership', 'true');
+            if (move_to_new_owners_root === true) params.set('moveToNewOwnersRoot', 'true');
 
             const result = await makeDriveRequest(
               `/files/${encodeURIComponent(file_id)}/permissions?${params}`,
@@ -1228,12 +1243,17 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
               },
             );
 
-            const verb = role === 'reader' ? 'view' : role === 'commenter' ? 'view and comment on' : 'edit';
-            const successMessage = type === 'anyone'
-              ? `Anyone with the link can ${verb} this file`
-              : type === 'domain'
-                ? `Anyone in ${normalisedDomain} can ${verb} this file`
-                : `Shared with ${email} as ${role}${notify ? ' (notified by email)' : ' (no notification sent)'}`;
+            // Drive keeps a higher existing role instead of lowering it, so report what it returned
+            const grantedRole = result.role;
+            const verb = grantedRole === 'reader' ? 'view' : grantedRole === 'commenter' ? 'view and comment on' : 'edit';
+            const roleNote = grantedRole !== role ? ` (Drive kept the existing ${grantedRole} role; use update_permission to lower it)` : '';
+            const successMessage = role === 'owner'
+              ? `Ownership of this file transferred to ${email}; the previous owner is now a writer`
+              : type === 'anyone'
+                ? `Anyone with the link can ${verb} this file${roleNote}`
+                : type === 'domain'
+                  ? `Anyone in ${normalisedDomain} can ${verb} this file${roleNote}`
+                  : `Shared with ${email} as ${grantedRole}${notify ? ' (notified by email)' : ' (no notification sent)'}${roleNote}`;
 
             const output = {
               permissionId: result.id,
@@ -1342,7 +1362,7 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
       },
 
       get_file_permissions: {
-        description: 'List the permissions (who has access and at what role) on a Google Drive file or folder. Use this to see how an item is shared — the users, groups, domains, or "anyone" links that can view/comment/edit it. Read-only; to grant access use share_file.',
+        description: 'List the permissions (who has access and at what role) on a Google Drive file or folder. Use this to see how an item is shared — the users, groups, domains, or "anyone" links that can view/comment/edit it. Read-only; to grant access use share_file, to change or remove it use update_permission.',
         readOnlyHint: true,
         outputSchema: {
           fileId: z.string(),
@@ -1385,6 +1405,61 @@ String literals use single quotes; escape internal apostrophes as \\' (e.g. name
             // Drive has more permissions we didn't fetch.
             if (pageToken) {
               output.incomplete = true;
+            }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+              structuredContent: output,
+            };
+          } catch (err) {
+            return formatDriveError(err);
+          }
+        }),
+      },
+
+      update_permission: {
+        description: 'Change or remove an existing permission on a Google Drive file or folder. Set role to "reader", "commenter" or "writer" to change the access level, up or down, or to "none" to revoke that user\'s, group\'s, domain\'s or link\'s access. Get the permission_id from get_file_permissions. A user can revoke their own access, but the owner\'s permission cannot be changed or removed; transfer ownership first with share_file role="owner".',
+        destructiveHint: true,
+        outputSchema: {
+          fileId: z.string(),
+          permissionId: z.string(),
+          role: z.string(),
+          message: z.string(),
+        },
+        schema: {
+          file_id: z.string().describe('ID of the file or folder whose permission to change.'),
+          permission_id: z.string().describe('ID of the permission to change or remove, from get_file_permissions.'),
+          role: z.enum(['reader', 'commenter', 'writer', 'none']).describe('New access level. "reader" = view, "commenter" = view+comment, "writer" = edit, "none" = revoke the permission.'),
+        },
+        handler: requirePermissionSecure("https://www.googleapis.com/auth/drive.file", async ({ file_id, permission_id, role }: any, context: any) => {
+          const { accessToken } = context;
+          const endpoint = `/files/${encodeURIComponent(file_id)}/permissions/${encodeURIComponent(permission_id)}`;
+
+          try {
+            let output;
+            if (role === 'none') {
+              await makeDriveRequest(`${endpoint}?supportsAllDrives=true`, accessToken, { method: 'DELETE' });
+              output = {
+                fileId: file_id,
+                permissionId: permission_id,
+                role: 'none',
+                message: `Permission ${permission_id} revoked`,
+              };
+            } else {
+              const result = await makeDriveRequest(
+                `${endpoint}?fields=id,role&supportsAllDrives=true`,
+                accessToken,
+                {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ role }),
+                },
+              );
+              output = {
+                fileId: file_id,
+                permissionId: result.id,
+                role: result.role,
+                message: `Permission ${result.id} is now ${result.role}`,
+              };
             }
             return {
               content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
